@@ -1,0 +1,16 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: mock-dns
+Source: https://github.com/Eierkopp/FileUploadServer
+
+Files: etc/* lib/* bin/*
+Copyright: 2017 Depperter Depp <depp@eierkopp.ddnss.org>
+License: GPL-2.0
+
+Files: debian/*
+Copyright: 2017 depp <depperter.depp@googlemail.com>
+License: GPL-3.0+
+
+# Please also look if there are files or directories which have a
+# different copyright/license attached and list them here.
+# Please avoid picking licenses with terms that are more restrictive than the
+# packaged work, as it may make Debian's contributions unacceptable upstream.
