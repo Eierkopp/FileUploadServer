@@ -10,6 +10,7 @@ import os
 import socket
 import ssl
 import types
+from pprint import pprint
 from functools import wraps
 from django.utils import text
 from flask import Flask, request, Response, render_template_string, make_response, send_file, redirect, url_for
@@ -145,7 +146,7 @@ TEMPLATE="""<!doctype html>
 </html>
 """
 
-letsencrypt_data = None
+letsencrypt_data = dict()
 
 def get_all_user(config, section, access):
     result = set()
@@ -297,38 +298,42 @@ def get_files(user):
 def get_dirs(user, access):
     return config.user_perms[user][access]
 
-def get_user(request):
-    """Get username either from cookie or basic auth header"""
+def get_user_from_request():
     try:
-        try:
-            auth = base64.b64decode(request.cookies["cred"]).decode("utf8")
-            user, password = auth.split(":", 1)
-        except:
-            auth = request.authorization
-            user, password = auth["username"], auth["password"]
-    
-        if config.user_perms[user]["creds"] == password:
-            return user
+        # form keys first
+        user = request.values.get("user", None)
+        password = request.values.get("password", None)
+        
+        if user is not None and password is not None:
+            return user, password
+
+        # basic-auth second
+        auth = request.authorization
+        if auth:
+            return auth["username"], auth["password"]
+
+        # creds cookie last
+        auth = base64.b64decode(request.cookies["cred"]).decode("utf8")
+        return auth.split(":", 1)
     except:
-        pass
-    return UNAUTH
+        return UNAUTH, None
+    
+
+def get_user():
+    """Get username either from cookie, basic auth header, or form keys"""
+
+    user, password = get_user_from_request()
+
+    if config.user_perms.get(user, dict()).get("creds", None) == password:
+        logging.getLogger(__name__).info("%s - - User %s active", request.remote_addr, user)
+        return user, password
+    
+    logging.getLogger(__name__).warn("%s - - Anonymous active %s:%s", request.remote_addr, user, password)
+    return UNAUTH, None
 
 def add_cookie(resp, user, password):
     val = "%s:%s" % (user, password)
     resp.set_cookie("cred", base64.b64encode(val.encode("utf8")).decode("ascii"))
-
-def fetch_user_auth():
-    user = request.values.get("user", None)
-    password = request.values.get("password", None)
-    if user:
-        creds = config.user_perms.get(user,{}).get("creds", None)
-        if creds == password:
-            logging.getLogger(__name__).info("%s - - User %s signed in", request.remote_addr, user)
-        else:
-            logging.getLogger(__name__).warn("%s - - Invalid credentials %s:%s", request.remote_addr, user, password)
-            user = UNAUTH
-            password = ""
-    return user, password
 
 def redirect_on_exception(func):
     @wraps(func)
@@ -345,25 +350,25 @@ def favicon():
     favicon = 'AAABAAEAEBAQjwAAAACoAQAAFgAAACgAAAAQAAAAIAAAAAEABAAAAAAAwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAAACAAAAAgIAAgAAAAIAAgACAgAAAgICAAMDAwAAAAP8AAP8AAAD//wD/AAAA/wD/AP//AAD///8AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB4h3AAAAAACIiI8AAAAAAI+I+AAAAAAAAAAAAAAAAAAId4AAAAAAAH939wAAAAAAdwB3AAAAAAAQAAEAAAAAALMAOwAAAAAAMAADAAAAAAAQAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA='
     return Response(base64.b64decode(favicon), mimetype="image/gif")
 
-@app.route("/.well-known/acme-challenge/<key>", methods=["GET"])
-def serve_letsencrypt(key):
-    logging.getLogger(__name__).info("%s - - letsencrypt verification request %s", request.remote_addr, key)
-    if letsencrypt_data:
-        return Response(letsencrypt_data, 200)
+@app.route("/.well-known/acme-challenge/<token>", methods=["GET"])
+def serve_letsencrypt(token):
+    logging.getLogger(__name__).info("%s - - letsencrypt verification request %s", request.remote_addr, token)
+    if token in letsencrypt_data:
+        return Response(letsencrypt_data[token], 200, mimetype="text/plain")
     else:
-        return Response("permission denied", 403)
+        return Response("permission denied", 403, mimetype="text/plain")
 
-@app.route("/.well-known/acme-challenge/upload/<key>", methods=["GET"])
-def upload_letsencrypt(key):
-    logging.getLogger(__name__).info("%s - - letsencrypt verification file upload %s", request.remote_addr, key)
+@app.route("/.well-known/acme-challenge/upload/<token>/<thumb>", methods=["GET"])
+def upload_letsencrypt(token, thumb):
+    logging.getLogger(__name__).info("%s - - letsencrypt verification file upload %s.%s", request.remote_addr, token, thumb)
     global letsencrypt_data
-    letsencrypt_data = key
-    return Response("ok", 200)
+    letsencrypt_data[token] = "%s.%s" % (token, thumb)
+    return Response("ok", 200, mimetype="text/plain")
 
 @app.route("/upload/file/<directory>/", methods=["POST"])
 @redirect_on_exception
 def upload_file(directory):
-    user = get_user(request)
+    user, password = get_user()
     files = get_files(user)
     if "write" not in files[directory]["access"]:
         return Response("permission denied", 403)
@@ -384,7 +389,7 @@ def upload_file(directory):
 @app.route("/delete/<dirname>/<filename>", methods=["GET"])
 @redirect_on_exception
 def delete_file_from_dir(dirname, filename):
-    user = get_user(request)
+    user, password = get_user()
     files = get_files(user)
     name = os.path.join(dirname, filename)
     for d, d_details in files.items():
@@ -410,7 +415,7 @@ def get_mime_type(f):
 @app.route("/<filename>", methods=["GET"])
 @redirect_on_exception
 def download_file(filename):
-    user = get_user(request)
+    user, password = get_user()
     files = get_files(user)
     for d, d_details in files.items():
         if "read" not in d_details["access"]:
@@ -424,21 +429,17 @@ def download_file(filename):
 @app.route("/", methods=["GET", "POST"])
 @redirect_on_exception
 def list_root():
-    new_user, passwd = fetch_user_auth()
-    status = request.values.get("status", None)
-    if new_user:
-        user = new_user
-    else:
-        user = get_user(request)
+    user, password = get_user()
         
     files = get_files(user)
 
+    status = request.values.get("status", None)
     resp = Response(render_template_string(TEMPLATE,
                                            files=files,
                                            status=status,
                                            user=user))
-    if new_user:
-        add_cookie(resp, user, passwd)
+    
+    add_cookie(resp, user, password)
     return resp
 
 run_server(app)
