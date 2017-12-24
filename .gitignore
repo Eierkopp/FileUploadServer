@@ -107,3 +107,8 @@ debian/fus/DEBIAN/md5sums
 debian/fus/usr/share/
 debian/fus/lib
 
+
+README.pdf
+auto_build.sh
+etc/fus_devel.conf
+*~

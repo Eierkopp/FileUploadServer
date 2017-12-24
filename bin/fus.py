@@ -2,6 +2,8 @@
 
 import argparse
 import base64
+import gevent
+from gevent.pywsgi import WSGIServer
 import json
 import logging
 from logging.config import dictConfig
@@ -222,26 +224,8 @@ def load_config():
 def setup_logging():
     log_config = json.loads(config.get("logging", "config"))
     dictConfig(log_config)
-
-def make_server_hack(*args, **kwargs):
-
-    def my_get_request(server):
-        con, info = server.unwrapped_socket.accept()
-        text_start = con.recv(4, socket.MSG_PEEK)
-        if text_start not in [b"GET ", b"POST", b"HEAD", b"OPTI"]:
-            con = server.ssl_context.wrap_socket(con, server_side=True)
-        return con, info
-    
-    server = werkzeug.serving.make_server_orig(*args, **kwargs)
-    server.unwrapped_socket = socket.fromfd(server.socket.fileno(), server.address_family, socket.SOCK_STREAM)
-    server.get_request = types.MethodType(my_get_request, server)
-    return server
             
-def setup_app():
-    # monkey patch server
-    werkzeug.serving.make_server_orig = werkzeug.serving.make_server
-    werkzeug.serving.make_server = make_server_hack
-    
+def setup_app(): 
     # create data dirs, if needed
     basedir = config.get("global", "basedir")
     for section in config.sections():
@@ -255,14 +239,23 @@ def setup_app():
     return app
 
 def run_server(app):
-    context = (config.get("global", "certfile"),
-               config.get("global", "keyfile"))
-    #context = None # disable SSL
-    app.run(host=config.get("global", "host"),
-               port=config.getint("global", "port"),
-               ssl_context=context,
-               threaded=True)
+    server = []
+    if config.has_option("global", "https_port"):
+        https_server = WSGIServer((config.get("global", "host"), config.getint("global", "https_port")),
+                                      app,
+                                      keyfile=config.get("global", "keyfile"),
+                                      certfile=config.get("global", "certfile"))
+        https_server.start()
+        server.append(https_server)
 
+    if config.has_option("global", "http_port"):
+        http_server = WSGIServer((config.get("global", "host"), config.getint("global", "http_port")),
+                                     app)
+        http_server.start()
+        server.append(http_server)
+        
+    return server
+    
 config = load_config()
 
 setup_logging()
@@ -373,7 +366,7 @@ def upload_file(directory):
     if "write" not in files[directory]["access"]:
         return Response("permission denied", 403)
     file = request.files['file']
-    fname = text.get_valid_filename(file.filename)
+    fname = text.get_valid_filename(os.path.basename(file.filename))
     name = os.path.join(directory, fname)
     fullname = os.path.join(config.get("global","basedir"), name)
     if not fname:
@@ -442,7 +435,12 @@ def list_root():
     add_cookie(resp, user, password)
     return resp
 
-run_server(app)
+server = run_server(app)
+
+while True:
+    gevent.sleep(60)
+
+
 
 
 
