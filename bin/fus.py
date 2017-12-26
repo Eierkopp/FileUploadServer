@@ -2,27 +2,37 @@
 
 import argparse
 import base64
-import gevent
-from gevent.pywsgi import WSGIServer
+from enum import Enum
 import json
 import logging
 from logging.config import dictConfig
 import mimetypes
 import os
-import socket
-import ssl
-import types
 from pprint import pprint
+import socket
+import stat
+import types
 from functools import wraps
+
+import gevent
+from gevent.pywsgi import WSGIServer
+
 from django.utils import text
 from flask import Flask, request, Response, render_template_string, make_response, send_file, redirect, url_for
 from configparser import SafeConfigParser, ExtendedInterpolation
 import werkzeug.serving
 
+class Access(Enum):
+    LIST = "list"
+    FETCH = "read"
+    DELETE = "delete"
+    UPLOAD = "write"
+    MKDIR = "mkdir"
+
 logging.basicConfig()
 
 UNAUTH = "anonymous"
-ACTIONS = [ "read", "write", "list", "delete" ]
+
 TEMPLATE="""<!doctype html>
 <html lang="de">
   <head>
@@ -115,45 +125,70 @@ TEMPLATE="""<!doctype html>
     </div>
   </div>
   <p>
-  {% for d, d_details in files.items() -%}
-  {% if d_details["access"] -%}
+  {% if allow_upload -%}
   <hr class="fullhr">
-  <div id="dir">{{d}}</div>
-  {% if "write" in d_details["access"] -%}
-  <form action="/upload/file/{{d}}/" method=post enctype=multipart/form-data>
+  <form action="/{{dirname}}?action=upload" method="post" enctype="multipart/form-data">
     <input type="file" name="file" />
     <button type="submit">upload</button>
   </form>
   {% endif -%}
-  {% if "list" in d_details["access"] -%}
-    <p>
-    {% for f, f_details in d_details["files"].items() -%}
-      <div id="row">
-      {% if "read" in d_details["access"] -%}
-      <div id="link"><a id="link" href="{{f_details['link']}}">{{f}}</a></div>
-      <div id="full_link">{{f_details["prefix"]}}{{f_details['full_link']}}</div>
-      {% else -%}
-      {{f}}
-      {% endif -%}
-      {% if "delete" in d_details["access"] -%}
-      <div id="delete"><a href="delete/{{f_details['full_link']}}">delete</a></div>
-      {% endif -%}
-      </div>
-      <p>
-    {% endfor -%}
-    {% endif -%}
+  {% if files -%}
+  <hr class="fullhr">
+  {% for f in files -%}
+  <p>
+  <div id="row">
+  </div>
+  {% if allow_fetch -%}
+  <div id="link"><a id="link" href="{{prefix}}{{f["path"]}}">{{f["name"]}}</a></div>
+  <div id="full_link">{{prefix}}{{f["path"]}}</div>
+  {% else -%}
+  {{f["name"]}}
+  {% endif -%}
+  {% if allow_delete -%}
+  <form action="/{{f["path"]}}" method="post">
+    <input type="hidden" name="action" value="delete" />
+    <button type="submit">delete</button>
+  </form>
   {% endif -%}
   {% endfor -%}
+  {% endif -%}
+  {% if subdirs or parentdir != None or allow_mkdir -%}
   <hr class="fullhr">
+  {% if parentdir != None -%}
+  <div id="row">
+  <div id="link"><a id="link" href="{{prefix}}{{parentdir}}">&lt;parent directory&gt;</a></div>
+  </div>
+  {% endif -%} 
+  {% if allow_mkdir -%}
+  <div id="row">
+  <form action="/{{dirname}}" method="get">
+    <input type="hidden" name="action" value="mkdir" />
+    <input type="text" name="dirname" />
+    <button type="submit">new directory</button>
+  </form>
+  </div>
+  {% endif -%} 
+  {% for s in subdirs -%}
+  <div id="row">
+  <div id="link"><a id="link" href="{{prefix}}{{s["path"]}}">{{s["name"]}}</a></div>
+  </div>
+  {% endfor -%}
+  <hr class="fullhr">
+  {% endif -%}
 </html>
 """
+
+class AccessError(Exception):
+
+    def __init__(self, code, message):
+        super().__init__(self, message, code)
 
 letsencrypt_data = dict()
 
 def get_all_user(config, section, access):
     result = set()
-    g_access = "%s_groups" % access
-    u_access = "%s_user" % access
+    g_access = "%s_groups" % access.value
+    u_access = "%s_user" % access.value
     groups = config.getlist(section, g_access) if config.has_option(section, g_access) else []
     group_sections = ["group:" + s for s in groups]
     for gs in group_sections:
@@ -167,7 +202,8 @@ def get_all_user(config, section, access):
 
 def init_actions(perms, user):
     u = perms.setdefault(user, dict())
-    for a in ACTIONS: u[a] = []
+    for i in Access:
+        u[i] = []
 
 def compute_permissions(config):
 
@@ -191,15 +227,16 @@ def compute_permissions(config):
         if section.startswith("dir:"):
             dir_name = section[4:]
             all_dirs.add(dir_name)
-            for action in ACTIONS:
-                all_user = get_all_user(config, section, action)
+            for access in Access:
+                all_user = get_all_user(config, section, access)
                 for user in all_user:
                     if user not in user_perms:
                         logging.getLogger(__name__).error("User '%s' unconfigured", user)
                         continue
-                    user_perms[user][action].append(dir_name)
+                    user_perms[user][access].append(dir_name)
     config.user_perms = user_perms
-    config.all_dirs = all_dirs
+    config.all_dirs = list(all_dirs)
+    config.all_dirs.sort()
 
 def load_config():
 
@@ -218,6 +255,9 @@ def load_config():
     config = SafeConfigParser(interpolation=ExtendedInterpolation())
     config.getlist = types.MethodType(get_list, config)
     config.read(args.config)
+    # normalize basedir
+    config.set("global", "basedir", os.path.abspath(config.get("global","basedir")))
+    
     compute_permissions(config)
     return config
 
@@ -262,35 +302,6 @@ setup_logging()
 
 app = setup_app()
 
-def get_files(user):
-    files = dict()
-    all_files = set()
-    for dir_name in config.all_dirs:
-        dir_dict = files.setdefault(dir_name, {"files" : dict(),
-                                               "access" : set()})
-        for access in ACTIONS:
-            if dir_name in config.user_perms[user][access]:
-                dir_dict["access"].add(access)
-
-        if not dir_dict["access"]:
-            continue
-                
-        dir_path = os.path.join(config.get("global", "basedir"), dir_name)
-        for f in os.listdir(dir_path):
-            details = dir_dict["files"].setdefault(f, dict())
-            details["path"] = os.path.join(dir_path, f)
-            details["prefix"] = "http%s://%s/" % ("" if dir_name in config.user_perms[UNAUTH]["read"] else "s", request.host)
-            details["full_link"] = os.path.join(dir_name, f)
-            if f not in config.all_dirs and f not in all_files:
-                details["link"] = f
-            else:
-                details["link"] = details["full_link"]
-            all_files.add(f)
-    return files
-
-def get_dirs(user, access):
-    return config.user_perms[user][access]
-
 def get_user_from_request():
     try:
         # form keys first
@@ -333,6 +344,9 @@ def redirect_on_exception(func):
     def __wrapper(*args, **kwargs):
         try:
             return func(*args, **kwargs)
+        except AccessError as e:
+            logging.getLogger(__name__).error("AccessError in function")
+            return Response(e.args[1], e.args[2], mimetype="text/plain")# e.args[0], str(e.args[1]), mimetype="text/plain")
         except:
             logging.getLogger(__name__).error("Error in function", exc_info=True)
             return redirect("/", code=302)
@@ -358,79 +372,188 @@ def upload_letsencrypt(token, thumb):
     letsencrypt_data[token] = "%s.%s" % (token, thumb)
     return Response("ok", 200, mimetype="text/plain")
 
-@app.route("/upload/file/<directory>/", methods=["POST"])
-@redirect_on_exception
-def upload_file(directory):
-    user, password = get_user()
-    files = get_files(user)
-    if "write" not in files[directory]["access"]:
-        return Response("permission denied", 403)
+def upload_file(user, directory):
     file = request.files['file']
     fname = text.get_valid_filename(os.path.basename(file.filename))
     name = os.path.join(directory, fname)
     fullname = os.path.join(config.get("global","basedir"), name)
     if not fname:
-        return redirect(url_for("list_root", status="invalid filename"), code=302) 
-    if fname in files[directory]["files"]:
+        return redirect(url_for("handle", path=directory, status="invalid filename"), code=302) 
+    if os.access(fullname, os.R_OK):
         return Response("duplicate", 403)
     file.save(fullname)
-    logging.getLogger(__name__).info("%s - - File %s uploaded by %s", request.remote_addr, name, user)
-    size = os.stat(fullname).st_size
-    return redirect(url_for("list_root", status="%d bytes saved as %s" % (size, fname)),
+    logging.info("%s - - File %s uploaded by %s", request.remote_addr, name, user)
+    size = os.lstat(fullname).st_size
+    return redirect(url_for("handle", path=directory, status="%d bytes saved as %s" % (size, fname)),
                     code=302)
     
-@app.route("/delete/<dirname>/<filename>", methods=["GET"])
-@redirect_on_exception
-def delete_file_from_dir(dirname, filename):
-    user, password = get_user()
-    files = get_files(user)
+def delete_file(user, dirname, filename):
     name = os.path.join(dirname, filename)
-    for d, d_details in files.items():
-        if "delete" not in d_details["access"]:
-            continue
-        for f, f_details in d_details["files"].items():
-            if f_details["full_link"] == name:
-                os.remove(f_details["path"])
-                logging.getLogger(__name__).info("%s - - File %s deleted by %s", request.remote_addr, name, user)
-                return redirect(url_for("list_root", status="Fle %s deleted" % name),
+    fullname = os.path.join(config.get("global","basedir"), name)
+    try:
+        os.remove(fullname)
+        logging.getLogger(__name__).info("%s - - File %s deleted by %s", request.remote_addr, fullname, user)
+        return redirect(url_for("handle", path=dirname, status="File %s deleted" % name),
                                 code=302)
+    except:
+        logging.error("%s - - Failed to delete %s by %s", request.remote_addr, fullname, user)
     return Response("permission denied", 403)
 
-@app.route("/<dirname>/<filename>", methods=["GET"])
-@redirect_on_exception
-def download_file_from_dir(dirname, filename):
-    return download_file(os.path.join(dirname, filename))
+def make_dir(user, dirname):
+    filename = fname = text.get_valid_filename(request.values["dirname"])
+    name = os.path.join(dirname, filename)
+    fullname = os.path.join(config.get("global","basedir"), name)
+    try:
+        os.makedirs(fullname)
+        logging.getLogger(__name__).info("%s - - Directory %s created by %s", request.remote_addr, fullname, user)
+        return redirect(url_for("handle", path=dirname, status="Directory %s created" % name),
+                                code=302)
+    except:
+        logging.error("%s - - Failed to create directory %s by %s", request.remote_addr, fullname, user)
+    return Response("permission denied", 403)
 
 def get_mime_type(f):
     type = mimetypes.guess_type(f, strict=False)[0]
     return type if type is not None else "application/octet-stream"
 
-@app.route("/<filename>", methods=["GET"])
-@redirect_on_exception
-def download_file(filename):
-    user, password = get_user()
-    files = get_files(user)
-    for d, d_details in files.items():
-        if "read" not in d_details["access"]:
-            continue
-        for f, f_details in d_details["files"].items():
-            if filename in [f_details["link"], f_details["full_link"]]:
-                logging.getLogger(__name__).info("%s - - File %s downloaded by %s", request.remote_addr, f_details["full_link"], user)
-                return send_file(f_details["path"], mimetype=get_mime_type(f))
-    return Response("permission denied", 403)
-
-@app.route("/", methods=["GET", "POST"])
-@redirect_on_exception
-def list_root():
-    user, password = get_user()
+def normalize_path(path):
+    basedir = config.get("global", "basedir")
+    name = os.path.abspath(os.path.join(basedir, path))
+    path = name[len(basedir):].strip(os.path.sep)
+    
+    if name != basedir and not name.startswith(basedir + os.path.sep):
+        logging.warn("Outside base: %s", name)
+        raise AccessError(403, "access denied1")
+    try:
         
-    files = get_files(user)
+        sr = os.lstat(name)
+    except FileNotFoundError:
+        logging.warn("File not found: %s", name)
+        raise AccessError(403, "access denied2")
+    except:
+        logging.error("Stat error on %s", name)
+        raise AccessError(403, "access denied3")
 
-    status = request.values.get("status", None)
-    resp = Response(render_template_string(TEMPLATE,
-                                           files=files,
-                                           status=status,
-                                           user=user))
+    if stat.S_ISLNK(sr.st_mode):
+        logging.warn("Link found: %s", name)
+        raise AccessError(403, "access denied4")
+    if sr.st_uid != os.geteuid():
+        logging.warn("Wrong owner found for %s", name)
+    
+    if stat.S_ISDIR(sr.st_mode):
+        return name, path, None
+
+    if stat.S_ISREG(sr.st_mode):
+        dirname, fname = os.path.split(path)
+        return name, dirname, fname
+
+    raise AccessError(403, "access denied")
+
+def has_access(user, dirname, action):
+    perms = config.user_perms.get(user, None)
+    if perms is None:
+        logging.error("Unknown user: %s", user)
+        raise AccessError(403, "access denied")
+
+    dirs = perms.get(action, None)
+    if dirs is None:
+        logging.error("Unknown action: %s", action)
+        raise AccessError(403, "access denied")
+
+    while True:
+        if dirname in config.all_dirs:
+            return dirname in dirs
+        if len(dirname) == 0 or dirname == os.path.sep:
+            return False
+        dirname, _ = os.path.split(dirname)
+        
+def list_dir(dirname):
+    names = os.listdir(dirname)
+    dirs = []
+    files = []
+    for n in names:
+        try:
+            if n.startswith("."):
+                continue
+            sr = os.lstat(os.path.join(dirname, n))
+            if sr.st_uid != os.geteuid():
+                continue
+            if stat.S_ISDIR(sr.st_mode):
+                dirs.append(n)
+            if stat.S_ISREG(sr.st_mode):
+                files.append(n)
+        except:
+            logging.exception("Error in list_dir(%s)", dirname)
+    return dirs, files
+
+def filter_file_list(user, dirname, subdirs, files):
+    files.sort()
+    subdirs.sort()
+    if not has_access(user, dirname, Access.LIST):
+        files.clear()
+    
+    for d in subdirs[:]:
+        if not (has_access(user, os.path.join(dirname,d), Access.LIST)
+                    or has_access(user, os.path.join(dirname,d), Access.UPLOAD)
+                    or has_access(user, os.path.join(dirname,d), Access.MKDIR)):
+            subdirs.remove(d)
+
+def mk_prefix():
+    return "http%s://%s/" % ("s" if request.is_secure else "", request.host)
+            
+@app.route('/', defaults={'path': ''}, methods=["GET", "POST"])
+@app.route('/<path:path>', methods=["GET", "POST"])
+@redirect_on_exception
+def handle(path):
+    user, password = get_user()
+
+    fullname, dirname, fname = normalize_path(path)
+
+    action = request.values.get("action", None)
+    
+    if fname is None and action in [ None, "list"]:
+        subdirs, files = list_dir(fullname)
+        filter_file_list(user, dirname, subdirs, files)
+        status = request.values.get("status", None)
+        resp = Response(
+            render_template_string(
+                TEMPLATE,
+                dirname=dirname,
+                parentdir=None if not dirname else os.path.split(dirname)[0],
+                prefix=mk_prefix(),
+                files=[ { "name" : f, "path" : os.path.join(dirname, f) } for f in files],
+                subdirs=[ { "name" : s, "path" : os.path.join(dirname, s) } for s in subdirs],
+                status=status,
+                allow_upload=has_access(user, dirname, Access.UPLOAD),
+                allow_delete=has_access(user, dirname, Access.DELETE),
+                allow_fetch=has_access(user, dirname, Access.FETCH),
+                allow_mkdir=has_access(user, dirname, Access.MKDIR),
+                user=user))
+
+    elif fname is None and action == "upload":
+        if has_access(user, dirname, Access.UPLOAD):
+            resp = upload_file(user, dirname)
+        else:
+            raise AccessError(403, "forbidden")
+
+    elif fname and action == "delete":
+        if has_access(user, dirname, Access.DELETE):
+            resp = delete_file(user, dirname, fname)
+        else:
+            raise AccessError(403, "forbidden")
+
+    elif fname is None and action == "mkdir":
+        if has_access(user, dirname, Access.MKDIR):
+            resp = make_dir(user, dirname)
+        else:
+            raise AccessError(403, "forbidden")
+
+    elif fname and action is None:
+        if has_access(user, dirname, Access.FETCH):
+            logging.getLogger(__name__).info("%s - - Download %s by %s", request.remote_addr, fullname, user)
+            resp = send_file(fullname, mimetype=get_mime_type(fullname))
+        else:
+            raise AccessError(403, "forbidden")
     
     add_cookie(resp, user, password)
     return resp
@@ -440,7 +563,5 @@ server = run_server(app)
 while True:
     gevent.sleep(60)
 
-
-
-
+#app.run(host="127.0.0.1", port=8080, debug=True)
 
