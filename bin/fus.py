@@ -426,7 +426,7 @@ def normalize_path(path):
         raise AccessError(403, "access denied1")
     try:
         
-        sr = os.lstat(name)
+        sr = os.stat(name)
     except FileNotFoundError:
         logging.warn("File not found: %s", name)
         raise AccessError(403, "access denied2")
@@ -434,9 +434,6 @@ def normalize_path(path):
         logging.error("Stat error on %s", name)
         raise AccessError(403, "access denied3")
 
-    if stat.S_ISLNK(sr.st_mode):
-        logging.warn("Link found: %s", name)
-        raise AccessError(403, "access denied4")
     if sr.st_uid != os.geteuid():
         logging.warn("Wrong owner found for %s", name)
     
@@ -475,7 +472,7 @@ def list_dir(dirname):
         try:
             if n.startswith("."):
                 continue
-            sr = os.lstat(os.path.join(dirname, n))
+            sr = os.stat(os.path.join(dirname, n))
             if sr.st_uid != os.geteuid():
                 continue
             if stat.S_ISDIR(sr.st_mode):
