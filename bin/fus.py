@@ -423,16 +423,16 @@ def normalize_path(path):
     
     if name != basedir and not name.startswith(basedir + os.path.sep):
         logging.warn("Outside base: %s", name)
-        raise AccessError(403, "access denied1")
+        raise AccessError(403, "forbidden")
     try:
         
         sr = os.stat(name)
     except FileNotFoundError:
         logging.warn("File not found: %s", name)
-        raise AccessError(403, "access denied2")
+        raise AccessError(403, "forbidden")
     except:
         logging.error("Stat error on %s", name)
-        raise AccessError(403, "access denied3")
+        raise AccessError(403, "forbidden")
 
     if sr.st_uid != os.geteuid():
         logging.warn("Wrong owner found for %s", name)
@@ -444,18 +444,18 @@ def normalize_path(path):
         dirname, fname = os.path.split(path)
         return name, dirname, fname
 
-    raise AccessError(403, "access denied")
+    raise AccessError(403, "forbidden")
 
 def has_access(user, dirname, action):
     perms = config.user_perms.get(user, None)
     if perms is None:
         logging.error("Unknown user: %s", user)
-        raise AccessError(403, "access denied")
+        raise AccessError(403, "forbidden")
 
     dirs = perms.get(action, None)
     if dirs is None:
         logging.error("Unknown action: %s", action)
-        raise AccessError(403, "access denied")
+        raise AccessError(403, "forbidden")
 
     while True:
         if dirname in config.all_dirs:
@@ -509,6 +509,11 @@ def handle(path):
     action = request.values.get("action", None)
     
     if fname is None and action in [ None, "list"]:
+        if not (has_access(user, dirname, Access.LIST)
+                    or has_access(user, dirname, Access.UPLOAD)
+                    or has_access(user, dirname, Access.MKDIR)):
+            raise AccessError(403, "forbidden")
+        
         subdirs, files = list_dir(fullname)
         filter_file_list(user, dirname, subdirs, files)
         status = request.values.get("status", None)
