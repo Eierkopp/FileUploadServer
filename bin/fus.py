@@ -41,17 +41,18 @@ TEMPLATE="""<!doctype html>
     <style>
       #head {
       border: 2px solid black;
+      overflow: hidden:
+      position: relative;
       display: table;
       clear: both;
       width: 100%;
       }
       #msgbox {
-      vertical-align: middle;
+      vertical-align: top;
       float: left;
-      width: 40%;
       }
       #loginbox {
-      vertical-align: middle;
+      vertical-align: top;
       float: right;
       }
       a {
@@ -79,22 +80,40 @@ TEMPLATE="""<!doctype html>
       width: 5%;
       float: right;
       }
+      #content {
+      }
       .fullhr {
       width: 100%;
       float: left;
+      }
+      .linkbutton {
+      background:none!important;
+      color:blue;
+      border:none; 
+      padding:0!important;
+      font: inherit;
+      border-bottom:1px solid #444; 
+      cursor: pointer;
       }
     </style>
   </head>
   <div id="head">
     <div id="msgbox">
-      <label>Status message: </label>
       {% if status -%}
-      <p>
-      {{ status }}
-      <p>
+      <div id="status">
+        <label>Status message: </label>
+        <p>
+        {{ status }}
+      </div>
+      {% else -%}
+      <div id="privacy">
+        <form method="POST" action="/privacy">
+          <input type="hidden" name="cred" value="{{cred}}"/>
+          <button class="linkbutton" type="submit">privacy</button>
+        </form>
+      </div>
       {% endif -%}
     </div>
-    <p>
     <div id="loginbox">
       <form method="POST" action="/">
         <table>
@@ -124,11 +143,12 @@ TEMPLATE="""<!doctype html>
       </form>
     </div>
   </div>
-  <p>
+  <div id="content">
   {% if allow_upload -%}
   <hr class="fullhr">
   <form action="/{{dirname}}?action=upload" method="post" enctype="multipart/form-data">
     <input type="file" name="file" />
+    <input type="hidden" name="cred" value="{{cred}}" />
     <button type="submit">upload</button>
   </form>
   {% endif -%}
@@ -146,7 +166,8 @@ TEMPLATE="""<!doctype html>
   {% endif -%}
   {% if allow_delete -%}
   <form action="/{{f["path"]}}" method="post">
-    <input type="hidden" name="action" value="delete" />
+    <input type="hidden" name="action" value="delete" />    
+    <input type="hidden" name="cred" value="{{cred}}" />
     <button type="submit">delete</button>
   </form>
   {% endif -%}
@@ -161,8 +182,9 @@ TEMPLATE="""<!doctype html>
   {% endif -%} 
   {% if allow_mkdir -%}
   <div id="row">
-  <form action="/{{dirname}}" method="get">
+  <form action="/{{dirname}}" method="POST">
     <input type="hidden" name="action" value="mkdir" />
+    <input type="hidden" name="cred" value="{{cred}}"/>
     <input type="text" name="dirname" />
     <button type="submit">new directory</button>
   </form>
@@ -170,11 +192,15 @@ TEMPLATE="""<!doctype html>
   {% endif -%} 
   {% for s in subdirs -%}
   <div id="row">
-  <div id="link"><a id="link" href="{{prefix}}{{s["path"]}}">{{s["name"]}}</a></div>
+  <form method="POST" action="{{prefix}}{{s["path"]}}">
+    <input type="hidden" name="cred" value="{{cred}}"/>
+    <button class="linkbutton">{{s["name"]}}</button>
+  </form>
   </div>
   {% endfor -%}
   <hr class="fullhr">
   {% endif -%}
+  </div>
 </html>
 """
 
@@ -316,12 +342,13 @@ def get_user_from_request():
         if auth:
             return auth["username"], auth["password"]
 
-        # creds cookie last
-        auth = base64.b64decode(request.cookies["cred"]).decode("utf8")
-        return auth.split(":", 1)
+        # credentials from cred form key
+        cred = request.values.get("cred", None)
+        if cred:
+            return base64.b64decode(cred).decode("utf8").split(":", 1)
     except:
-        return UNAUTH, None
-    
+        pass
+    return UNAUTH, None
 
 def get_user():
     """Get username either from cookie, basic auth header, or form keys"""
@@ -330,14 +357,11 @@ def get_user():
 
     if config.user_perms.get(user, dict()).get("creds", None) == password:
         logging.getLogger(__name__).info("%s - - User %s active", request.remote_addr, user)
-        return user, password
+        cred = base64.b64encode(("%s:%s" % (user, password)).encode("ascii")).decode("ascii")
+        return user, password, cred
     
     logging.getLogger(__name__).warn("%s - - Anonymous active %s:%s", request.remote_addr, user, password)
-    return UNAUTH, None
-
-def add_cookie(resp, user, password):
-    val = "%s:%s" % (user, password)
-    resp.set_cookie("cred", base64.b64encode(val.encode("utf8")).decode("ascii"))
+    return UNAUTH, None, ""
 
 def redirect_on_exception(func):
     @wraps(func)
@@ -372,41 +396,41 @@ def upload_letsencrypt(token, thumb):
     letsencrypt_data[token] = "%s.%s" % (token, thumb)
     return Response("ok", 200, mimetype="text/plain")
 
-def upload_file(user, directory):
+def upload_file(user, cred, directory):
     file = request.files['file']
     fname = text.get_valid_filename(os.path.basename(file.filename))
     name = os.path.join(directory, fname)
     fullname = os.path.join(config.get("global","basedir"), name)
     if not fname:
-        return redirect(url_for("handle", path=directory, status="invalid filename"), code=302) 
+        return redirect(url_for("handle", cred=cred, path=directory, status="invalid filename"), code=302) 
     if os.access(fullname, os.R_OK):
         return Response("duplicate", 403)
     file.save(fullname)
     logging.info("%s - - File %s uploaded by %s", request.remote_addr, name, user)
     size = os.lstat(fullname).st_size
-    return redirect(url_for("handle", path=directory, status="%d bytes saved as %s" % (size, fname)),
+    return redirect(url_for("handle", cred=cred, path=directory, status="%d bytes saved as %s" % (size, fname)),
                     code=302)
     
-def delete_file(user, dirname, filename):
+def delete_file(user, cred, dirname, filename):
     name = os.path.join(dirname, filename)
     fullname = os.path.join(config.get("global","basedir"), name)
     try:
         os.remove(fullname)
         logging.getLogger(__name__).info("%s - - File %s deleted by %s", request.remote_addr, fullname, user)
-        return redirect(url_for("handle", path=dirname, status="File %s deleted" % name),
+        return redirect(url_for("handle", cred=cred, path=dirname, status="File %s deleted" % name),
                                 code=302)
     except:
         logging.error("%s - - Failed to delete %s by %s", request.remote_addr, fullname, user)
     return Response("permission denied", 403)
 
-def make_dir(user, dirname):
+def make_dir(user, cred, dirname):
     filename = fname = text.get_valid_filename(request.values["dirname"])
     name = os.path.join(dirname, filename)
     fullname = os.path.join(config.get("global","basedir"), name)
     try:
         os.makedirs(fullname)
         logging.getLogger(__name__).info("%s - - Directory %s created by %s", request.remote_addr, fullname, user)
-        return redirect(url_for("handle", path=dirname, status="Directory %s created" % name),
+        return redirect(url_for("handle", cred=cred, path=dirname, status="Directory %s created" % name),
                                 code=302)
     except:
         logging.error("%s - - Failed to create directory %s by %s", request.remote_addr, fullname, user)
@@ -497,12 +521,17 @@ def filter_file_list(user, dirname, subdirs, files):
 
 def mk_prefix():
     return "http%s://%s/" % ("s" if request.is_secure else "", request.host)
-            
+
+@app.route("/privacy", methods=["POST"])
+def privacy():
+    user, password, cred = get_user()
+    return redirect(url_for("handle", path="", cred=cred, status="This server does not log or store any personal data."), code=302) 
+
 @app.route('/', defaults={'path': ''}, methods=["GET", "POST"])
 @app.route('/<path:path>', methods=["GET", "POST"])
 @redirect_on_exception
 def handle(path):
-    user, password = get_user()
+    user, password, cred = get_user()
 
     fullname, dirname, fname = normalize_path(path)
 
@@ -530,23 +559,24 @@ def handle(path):
                 allow_delete=has_access(user, dirname, Access.DELETE),
                 allow_fetch=has_access(user, dirname, Access.FETCH),
                 allow_mkdir=has_access(user, dirname, Access.MKDIR),
-                user=user))
+                user=user,
+                cred=cred))
 
     elif fname is None and action == "upload":
         if has_access(user, dirname, Access.UPLOAD):
-            resp = upload_file(user, dirname)
+            resp = upload_file(user, cred, dirname)
         else:
             raise AccessError(403, "forbidden")
 
     elif fname and action == "delete":
         if has_access(user, dirname, Access.DELETE):
-            resp = delete_file(user, dirname, fname)
+            resp = delete_file(user, cred, dirname, fname)
         else:
             raise AccessError(403, "forbidden")
 
     elif fname is None and action == "mkdir":
         if has_access(user, dirname, Access.MKDIR):
-            resp = make_dir(user, dirname)
+            resp = make_dir(user, cred, dirname)
         else:
             raise AccessError(403, "forbidden")
 
@@ -554,10 +584,10 @@ def handle(path):
         if has_access(user, dirname, Access.FETCH):
             logging.getLogger(__name__).info("%s - - Download %s by %s", request.remote_addr, fullname, user)
             resp = send_file(fullname, mimetype=get_mime_type(fullname))
+            resp.make_conditional(request)
         else:
             raise AccessError(403, "forbidden")
     
-    add_cookie(resp, user, password)
     return resp
 
 server = run_server(app)
@@ -565,5 +595,5 @@ server = run_server(app)
 while True:
     gevent.sleep(60)
 
-#app.run(host="127.0.0.1", port=8080, debug=True)
+#app.run(host="127.0.0.1", port=config.getint("global", "http_port"), debug=True)
 
