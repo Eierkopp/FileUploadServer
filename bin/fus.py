@@ -177,7 +177,11 @@ TEMPLATE="""<!doctype html>
   <hr class="fullhr">
   {% if parentdir != None -%}
   <div id="row">
-  <div id="link"><a id="link" href="{{prefix}}{{parentdir}}">&lt;parent directory&gt;</a></div>
+  <div id="link">
+    <form method="POST" action="{{prefix}}{{parentdir}}">
+    <input type="hidden" name="cred" value="{{cred}}"/>
+    <button class="linkbutton">&lt;parent directory&gt;</button>
+  </form>
   </div>
   {% endif -%} 
   {% if allow_mkdir -%}
