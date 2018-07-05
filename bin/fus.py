@@ -13,6 +13,9 @@ import socket
 import stat
 import types
 from functools import wraps
+from cryptography.fernet import Fernet
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.backends import default_backend
 
 import gevent
 from gevent.pywsgi import WSGIServer
@@ -159,14 +162,14 @@ TEMPLATE="""<!doctype html>
   <div id="row">
   </div>
   {% if allow_fetch -%}
-  <div id="link"><a id="link" href="{{prefix}}{{f["path"]}}">{{f["name"]}}</a></div>
+  <div id="link"><a href="{{prefix}}{{f["path"]}}?auth={{f["auth"]}}">{{f["name"]}}</a></div>
   <div id="full_link">{{prefix}}{{f["path"]}}</div>
   {% else -%}
   {{f["name"]}}
   {% endif -%}
   {% if allow_delete -%}
   <form action="/{{f["path"]}}" method="post">
-    <input type="hidden" name="action" value="delete" />    
+    <input type="hidden" name="action" value="delete" />
     <input type="hidden" name="cred" value="{{cred}}" />
     <button type="submit">delete</button>
   </form>
@@ -332,7 +335,19 @@ setup_logging()
 
 app = setup_app()
 
-def get_user_from_request():
+def mk_fernet_key(path):
+    key_str = config.get("global", "secret")
+    sha256 = digest = hashes.Hash(hashes.SHA256(), backend=default_backend())
+    sha256.update(key_str.encode("ascii"))
+    key = sha256.finalize()
+    return base64.urlsafe_b64encode(key)
+
+def mk_auth(user, password, path):
+    key = mk_fernet_key(path)
+    f = Fernet(key)
+    return f.encrypt((user + ":" + password).encode("utf8")).decode("ascii")
+    
+def get_user_from_request(path):
     try:
         # form keys first
         user = request.values.get("user", None)
@@ -350,14 +365,23 @@ def get_user_from_request():
         cred = request.values.get("cred", None)
         if cred:
             return base64.b64decode(cred).decode("utf8").split(":", 1)
+
+        # encrypted credentials from auth url param
+        auth = request.args.get("auth", None)
+        if auth:
+            key = mk_fernet_key(path)
+            f = Fernet(key)
+            cred = f.decrypt(auth.encode("utf8")).decode("utf8")
+            return cred.split(":", 1)
+        
     except:
-        pass
+        logging.info("Error", exc_info=True)
     return UNAUTH, None
 
-def get_user():
+def get_user(path=None):
     """Get username either from cookie, basic auth header, or form keys"""
 
-    user, password = get_user_from_request()
+    user, password = get_user_from_request(path)
 
     if config.user_perms.get(user, dict()).get("creds", None) == password:
         logging.getLogger(__name__).info("%s - - User %s active", request.remote_addr, user)
@@ -535,7 +559,7 @@ def privacy():
 @app.route('/<path:path>', methods=["GET", "POST"])
 @redirect_on_exception
 def handle(path):
-    user, password, cred = get_user()
+    user, password, cred = get_user(path)
 
     fullname, dirname, fname = normalize_path(path)
 
@@ -556,13 +580,16 @@ def handle(path):
                 dirname=dirname,
                 parentdir=None if not dirname else os.path.split(dirname)[0],
                 prefix=mk_prefix(),
-                files=[ { "name" : f, "path" : os.path.join(dirname, f) } for f in files],
+                files=[ { "name" : f,
+                          "path" : os.path.join(dirname, f),
+                          "auth" : mk_auth(user, password, os.path.join(dirname, f))} for f in files],
                 subdirs=[ { "name" : s, "path" : os.path.join(dirname, s) } for s in subdirs],
                 status=status,
                 allow_upload=has_access(user, dirname, Access.UPLOAD),
                 allow_delete=has_access(user, dirname, Access.DELETE),
                 allow_fetch=has_access(user, dirname, Access.FETCH),
                 allow_mkdir=has_access(user, dirname, Access.MKDIR),
+                debug=config.getboolean("global", "debug"),
                 user=user,
                 cred=cred))
 
@@ -599,5 +626,6 @@ server = run_server(app)
 while True:
     gevent.sleep(60)
 
-#app.run(host="127.0.0.1", port=config.getint("global", "http_port"), debug=True)
+app.run(host="127.0.0.1", port=config.getint("global", "http_port"), debug=True)
+
 
