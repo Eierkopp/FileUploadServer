@@ -9,6 +9,7 @@ from logging.config import dictConfig
 import mimetypes
 import os
 from pprint import pprint
+import re
 import socket
 import stat
 import types
@@ -335,6 +336,11 @@ setup_logging()
 
 app = setup_app()
 
+@app.after_request
+def after_request(response):
+    response.headers.add('Accept-Ranges', 'bytes')
+    return response
+
 def mk_fernet_key(path):
     key_str = config.get("global", "secret")
     sha256 = digest = hashes.Hash(hashes.SHA256(), backend=default_backend())
@@ -555,6 +561,46 @@ def privacy():
     user, password, cred = get_user()
     return redirect(url_for("handle", path="", cred=cred, status="This server does not log or store any personal data."), code=302) 
 
+def streamfile(fullname):
+
+    def send_chunks_iter(filename, start, length):
+        with open(filename, 'rb') as f:
+            offset = 0
+            while offset < length:
+                f.seek(start + offset)
+                chunk = config.getint("global", "chunksize")
+                if offset + chunk > length:
+                    chunk = length - offset
+                offset += chunk
+                logging.getLogger(__name__).debug("Sending %d-%d of %s", start+offset, start+offset+length, filename)
+                yield f.read(chunk)
+    
+    range_header = request.headers.get('Range', None)
+    if not range_header:
+        resp = send_file(fullname, mimetype=get_mime_type(fullname))
+        resp.make_conditional(request)
+        return resp
+    
+    size = os.path.getsize(fullname)    
+    byte1, byte2 = 0, None
+    
+    m = re.search('(\d+)-(\d*)', range_header)
+    g = m.groups()
+    
+    if g[0]: byte1 = int(g[0])
+    if g[1]: byte2 = int(g[1])
+
+    length = size - byte1
+    if byte2 is not None:
+        length = min(byte2 - byte1 + 1, length)
+
+    resp = Response(send_chunks_iter(fullname, byte1, length),
+            206,
+            mimetype=get_mime_type(fullname),
+            direct_passthrough=True)
+    resp.headers.add('Content-Range', 'bytes {0}-{1}/{2}'.format(byte1, byte1 + length - 1, size))
+    return resp
+
 @app.route('/', defaults={'path': ''}, methods=["GET", "POST"])
 @app.route('/<path:path>', methods=["GET", "POST"])
 @redirect_on_exception
@@ -614,8 +660,7 @@ def handle(path):
     elif fname and action is None:
         if has_access(user, dirname, Access.FETCH):
             logging.getLogger(__name__).info("%s - - Download %s by %s", request.remote_addr, fullname, user)
-            resp = send_file(fullname, mimetype=get_mime_type(fullname))
-            resp.make_conditional(request)
+            resp = streamfile(fullname)
         else:
             raise AccessError(403, "forbidden")
     
