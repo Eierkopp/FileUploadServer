@@ -338,6 +338,7 @@ app = setup_app()
 
 @app.after_request
 def after_request(response):
+    response.headers.remove('Accept-Ranges')
     response.headers.add('Accept-Ranges', 'bytes')
     return response
 
