@@ -10,6 +10,7 @@ import mimetypes
 import os
 import re
 import stat
+import threading
 import types
 from functools import wraps
 from cryptography.fernet import Fernet
@@ -22,7 +23,13 @@ from gevent.pywsgi import WSGIServer
 from django.utils import text
 from flask import Flask, request, Response, render_template_string, \
     send_file, redirect, url_for
-from configparser import SafeConfigParser, ExtendedInterpolation
+
+from pyftpdlib.authorizers import AuthenticationFailed
+from pyftpdlib.filesystems import AbstractedFS, FilesystemError
+from pyftpdlib.handlers import FTPHandler
+from pyftpdlib.servers import FTPServer
+
+from configparser import ConfigParser, ExtendedInterpolation
 
 
 class Access(Enum):
@@ -252,13 +259,13 @@ def compute_permissions(config):
         else:
             return base64.b64decode(config.get(section, "b64_password")).decode("utf8")
 
-    user_perms = { UNAUTH: { "creds" : None } }
+    user_perms = {UNAUTH: {"creds": None}}
     init_actions(user_perms, UNAUTH)
 
     for section in config.sections():
         if section.startswith("user:"):
             user = section[5:]
-            user_perms[user] = { "creds" : mk_creds(config, section) }
+            user_perms[user] = {"creds": mk_creds(config, section)}
             init_actions(user_perms, user)
 
     all_dirs = set()
@@ -277,6 +284,7 @@ def compute_permissions(config):
     config.all_dirs = list(all_dirs)
     config.all_dirs.sort()
 
+
 def load_config():
 
     def get_list(conf, section, option, **kwargs):
@@ -285,24 +293,27 @@ def load_config():
 
     parser = argparse.ArgumentParser(prog='file upload server')
     parser.add_argument("--config",
-                    help="configuration file location",
-                    dest="config",
-                    default="/etc/fus.conf")
+                        help="configuration file location",
+                        dest="config",
+                        default="/etc/fus.conf")
 
     args = parser.parse_args()
 
-    config = SafeConfigParser(interpolation=ExtendedInterpolation())
+    config = ConfigParser(interpolation=ExtendedInterpolation())
     config.getlist = types.MethodType(get_list, config)
     config.read(args.config)
     # normalize basedir
-    config.set("global", "basedir", os.path.abspath(config.get("global","basedir")))
+    config.set("global", "basedir",
+               os.path.abspath(config.get("global", "basedir")))
 
     compute_permissions(config)
     return config
 
+
 def setup_logging():
     log_config = json.loads(config.get("logging", "config"))
     dictConfig(log_config)
+
 
 def setup_app():
     # create data dirs, if needed
@@ -317,13 +328,15 @@ def setup_app():
     app.config['DEBUG'] = config.getboolean("global", "debug")
     return app
 
+
 def run_server(app):
     server = []
     if config.has_option("global", "https_port"):
-        https_server = WSGIServer((config.get("global", "host"), config.getint("global", "https_port")),
-                                      app,
-                                      keyfile=config.get("global", "keyfile"),
-                                      certfile=config.get("global", "certfile"))
+        https_server = WSGIServer((config.get("global", "host"),
+                                   config.getint("global", "https_port")),
+                                  app,
+                                  keyfile=config.get("global", "keyfile"),
+                                  certfile=config.get("global", "certfile"))
         https_server.start()
         server.append(https_server)
 
@@ -407,12 +420,16 @@ def get_user(path=None):
     user, password = get_user_from_request(path)
 
     if config.user_perms.get(user, dict()).get("creds", None) == password:
-        logging.getLogger(__name__).info("%s - - User %s active", request.remote_addr, user)
-        cred = base64.b64encode(("%s:%s" % (user, password)).encode("ascii")).decode("ascii")
+        logging.getLogger(__name__).info("%s - - User %s active",
+                                         request.remote_addr, user)
+        cred = ("%s:%s" % (user, password)).encode("ascii")
+        cred = base64.b64encode(cred).decode("ascii")
         return user, password, cred
 
-    logging.getLogger(__name__).warn("%s - - Anonymous active %s:%s", request.remote_addr, user, password)
+    logging.getLogger(__name__).warning("%s - - Anonymous active %s:%s",
+                                        request.remote_addr, user, password)
     return UNAUTH, None, ""
+
 
 def redirect_on_exception(func):
     @wraps(func)
@@ -421,43 +438,54 @@ def redirect_on_exception(func):
             return func(*args, **kwargs)
         except AccessError as e:
             logging.getLogger(__name__).error("AccessError in function")
-            return Response(e.args[1], e.args[2], mimetype="text/plain")# e.args[0], str(e.args[1]), mimetype="text/plain")
-        except:
-            logging.getLogger(__name__).error("Error in function", exc_info=True)
+            return Response(e.args[1], e.args[2], mimetype="text/plain")
+        except Exception:
+            logging.getLogger(__name__).error("Error in function",
+                                              exc_info=True)
             return redirect("/", code=302)
     return __wrapper
+
 
 @app.route("/favicon.ico", methods=["GET"])
 def favicon():
     favicon = 'AAABAAEAEBAQjwAAAACoAQAAFgAAACgAAAAQAAAAIAAAAAEABAAAAAAAwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAAACAAAAAgIAAgAAAAIAAgACAgAAAgICAAMDAwAAAAP8AAP8AAAD//wD/AAAA/wD/AP//AAD///8AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB4h3AAAAAACIiI8AAAAAAI+I+AAAAAAAAAAAAAAAAAAId4AAAAAAAH939wAAAAAAdwB3AAAAAAAQAAEAAAAAALMAOwAAAAAAMAADAAAAAAAQAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA='
     return Response(base64.b64decode(favicon), mimetype="image/gif")
 
+
 @app.route("/.well-known/acme-challenge/<token>", methods=["GET"])
 def serve_letsencrypt(token):
-    logging.getLogger(__name__).info("%s - - letsencrypt verification request %s", request.remote_addr, token)
+    logging.getLogger(__name__).info("%s - - cert verification request %s",
+                                     request.remote_addr, token)
     if token in letsencrypt_data:
         return Response(letsencrypt_data[token], 200, mimetype="text/plain")
     else:
         return Response("permission denied", 403, mimetype="text/plain")
 
-@app.route("/.well-known/acme-challenge/upload/<token>/<thumb>", methods=["GET"])
+
+@app.route("/.well-known/acme-challenge/upload/<token>/<thumb>",
+           methods=["GET"])
 def upload_letsencrypt(token, thumb):
-    logging.getLogger(__name__).info("%s - - letsencrypt verification file upload %s.%s", request.remote_addr, token, thumb)
+    logging.getLogger(__name__).info("%s - - cer verification file %s.%s",
+                                     request.remote_addr, token, thumb)
     global letsencrypt_data
     letsencrypt_data[token] = "%s.%s" % (token, thumb)
     return Response("ok", 200, mimetype="text/plain")
+
 
 def upload_file(user, cred, directory):
     file = request.files['file']
     fname = text.get_valid_filename(os.path.basename(file.filename))
     name = os.path.join(directory, fname)
-    fullname = os.path.join(config.get("global","basedir"), name)
+    fullname = os.path.join(config.get("global", "basedir"), name)
     if not fname:
-        return redirect(url_for("handle", cred=cred, path=directory, status="invalid filename"), code=302)
+        return redirect(url_for("handle", cred=cred, path=directory,
+                                status="invalid filename"),
+                        code=302)
     if os.access(fullname, os.R_OK):
         return Response("duplicate", 403)
     file.save(fullname)
-    logging.info("%s - - File %s uploaded by %s", request.remote_addr, name, user)
+    logging.info("%s - - File %s uploaded by %s",
+                 request.remote_addr, name, user)
     size = os.lstat(fullname).st_size
     return redirect(url_for("handle", cred=cred, path=directory,
                             status="%d bytes saved as %s" % (size, fname)),
@@ -540,6 +568,7 @@ def normalize_path(path):
 
     raise AccessError(403, "forbidden")
 
+
 def has_access(user, dirname, action):
     perms = config.user_perms.get(user, None)
     if perms is None:
@@ -558,6 +587,7 @@ def has_access(user, dirname, action):
             return False
         dirname, _ = os.path.split(dirname)
 
+
 def list_dir(dirname):
     names = os.listdir(dirname)
     dirs = []
@@ -573,7 +603,7 @@ def list_dir(dirname):
                 dirs.append(n)
             if stat.S_ISREG(sr.st_mode):
                 files.append(n)
-        except:
+        except Exception:
             logging.exception("Error in list_dir(%s)", dirname)
     return dirs, files
 
@@ -726,10 +756,174 @@ def handle(path):
 
     return resp
 
-
-#server = run_server(app)
-
-#while True:
-#    gevent.sleep(60)
+#
+# FTP adapter
+#
 
 
+class MyAuthorizer(object):
+
+    def validate_authentication(self, username, password, handler):
+        creds = config.user_perms.get(username, dict()).get("creds", None)
+        if creds != password:
+            logging.warning("Invalid credentials for user %s", username)
+            raise AuthenticationFailed()
+        logging.info("User %s logged in", username)
+
+    def get_home_dir(self, username):
+        return config.get("global", "basedir")
+
+    def get_msg_login(self, username):
+        return "Welcome, %s." % username
+
+    def get_msg_quit(self, username):
+        return "Bye."
+
+    def impersonate_user(self, username, password):
+        pass
+
+    def terminate_impersonation(self, username):
+        pass
+
+    def has_user(self, username):
+        return True
+
+    def get_perms(self, username):
+        return "l"
+
+    def has_perm(self, username, perm, path=None):
+        if path and path.startswith(config.get("global", "basedir")):
+            path = path[len(config.get("global", "basedir")):]
+        path = path.lstrip(os.path.sep)
+
+        if perm in "elmrwd":
+            logging.debug("User %s granted %s for '%s'",
+                          username,
+                          perm,
+                          path)
+            return True
+        else:
+            logging.warn("Perm %s invalid for user %s at '%s'",
+                         perm,
+                         username,
+                         path)
+        return False
+
+
+class MyFilesystem(AbstractedFS):
+
+    def strip_path(self, path):
+        if path.startswith(config.get("global", "basedir")):
+            path = path[len(config.get("global", "basedir")):]
+        return path.lstrip(os.path.sep)
+
+    def has_access(self, path, access_list):
+        path = self.strip_path(path)
+        user = self.cmd_channel.username
+
+        if isinstance(access_list, Access):
+            access_list = [access_list]
+        for access in access_list:
+            try:
+                if has_access(user, path, access):
+                    logging.info("%s granted to %s for '%s'",
+                                 access, user, path)
+                    return True
+                logging.debug("%s not allowed for %s at '%s'",
+                              access, user, path)
+            except AccessError:
+                pass
+        logging.warning("%s not allowed for %s at '%s'",
+                        access_list, user, path)
+        return False
+
+    def get_user_by_uid(self, uid):
+        return "fus"
+
+    def get_group_by_gid(self, gid):
+        return "fus"
+
+    def chdir(self, path):
+        if self.has_access(path, [Access.LIST, Access.MKDIR, Access.UPLOAD]):
+            return AbstractedFS.chdir(self, path)
+        else:
+            raise FilesystemError("invalid path")
+
+    def mkdir(self, path):
+        if self.has_access(path, Access.MKDIR):
+            return AbstractedFS.mkdir(self, path)
+        else:
+            raise FilesystemError("invalid path")
+
+    def listdir(self, path):
+        user = self.cmd_channel.username
+        if self.has_access(path, Access.LIST):
+            dirs, files = list_dir(path)
+            basepath = self.strip_path(path)
+            filter_file_list(user, basepath, dirs, files)
+            return dirs + files
+        else:
+            raise FilesystemError("invalid path")
+
+    def remove(self, path):
+        if self.has_access(path, Access.DELETE):
+            return AbstractedFS.remove(self, path)
+        else:
+            raise FilesystemError("invalid path")
+
+    def rename(self, src, dst):
+        raise FilesystemError("invalid path")
+
+    def chmod(self, path, mode):
+        raise FilesystemError("invalid path")
+
+    def open(self, filename, mode):
+        path, name = os.path.split(filename)
+        name = text.get_valid_filename(name)
+
+        if "w" in mode:
+            if self.has_access(path, Access.UPLOAD):
+                return AbstractedFS.open(self, filename, mode)
+            else:
+                raise FilesystemError("invalid path")
+        else:
+            if self.has_access(path, Access.FETCH):
+                return AbstractedFS.open(self, filename, mode)
+            else:
+                raise FilesystemError("invalid path")
+
+    def mkstemp(self, suffix='', prefix='', path=None, mode='wb'):
+        raise FilesystemError("invalid path")
+
+
+def make_ftp_server():
+
+    ftp_handler = FTPHandler
+    ftp_handler.authorizer = MyAuthorizer()
+    ftp_handler.abstracted_fs = MyFilesystem
+
+    ftp_handler.banner = "fus at your service."
+    address = (config.get("global", "host"),
+               config.getint("global", "ftp_port"))
+    ftp_server = FTPServer(address, ftp_handler)
+    ftp_server.set_reuse_addr()
+
+    return ftp_server
+
+
+ftp_server = make_ftp_server()
+
+ftp_thread = threading.Thread(target=ftp_server.serve_forever, args=(1,))
+ftp_thread.start()
+
+http_server = run_server(app)
+while True:
+    try:
+        gevent.sleep(60)
+    except KeyboardInterrupt:
+        break
+
+logging.getLogger(__name__).info("HTTP Server stopped")
+ftp_server.close_all()
+ftp_thread.join()
+logging.getLogger(__name__).info("FTP Server stopped")
