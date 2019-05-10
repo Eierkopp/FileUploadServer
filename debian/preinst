@@ -1,9 +1,9 @@
 #!/bin/bash
 
+getent passwd fus >/dev/null || useradd -U -m fus
+
 [ -d /var/log/fus ] || mkdir /var/log/fus
 chown -R fus:fus /var/log/fus
-
-getent passwd fus >/dev/null || useradd -U -m fus
 
 usermod -G ssl-cert fus
 

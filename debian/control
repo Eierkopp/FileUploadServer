@@ -2,11 +2,11 @@ Source: fus
 Section: net
 Priority: optional
 Maintainer: Depperter Depp <depp@eierkopp.ddnss.org>
-Build-Depends: debhelper (>= 9), dh-python, python3, python3-flask, python3-django
+Build-Depends: debhelper (>= 9), dh-python, python3, python3-flask, python3-django, python3-cryptography
 
 Package: fus
 Architecture: all
-Depends: python3, python3-gevent
+Depends: python3, python3-gevent, python3-django, python3-flask, python3-cryptography, python3-pyftpdlib
 Description: file upload server
  Simple file server serving a set of directories with
  configurable access rights.
