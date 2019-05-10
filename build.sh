@@ -1,3 +1,3 @@
 #!/bin/bash
 
-dpkg-buildpackage -b
+dpkg-buildpackage -b --no-sign

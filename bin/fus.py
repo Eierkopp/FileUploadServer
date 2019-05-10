@@ -8,9 +8,7 @@ import logging
 from logging.config import dictConfig
 import mimetypes
 import os
-from pprint import pprint
 import re
-import socket
 import stat
 import types
 from functools import wraps
@@ -22,9 +20,10 @@ import gevent
 from gevent.pywsgi import WSGIServer
 
 from django.utils import text
-from flask import Flask, request, Response, render_template_string, make_response, send_file, redirect, url_for
+from flask import Flask, request, Response, render_template_string, \
+    send_file, redirect, url_for
 from configparser import SafeConfigParser, ExtendedInterpolation
-import werkzeug.serving
+
 
 class Access(Enum):
     LIST = "list"
@@ -33,11 +32,12 @@ class Access(Enum):
     UPLOAD = "write"
     MKDIR = "mkdir"
 
+
 logging.basicConfig()
 
 UNAUTH = "anonymous"
 
-TEMPLATE="""<!doctype html>
+TEMPLATE = """<!doctype html>
 <html lang="de">
   <head>
     <meta charset="utf-8">
@@ -93,10 +93,10 @@ TEMPLATE="""<!doctype html>
       .linkbutton {
       background:none!important;
       color:blue;
-      border:none; 
+      border:none;
       padding:0!important;
       font: inherit;
-      border-bottom:1px solid #444; 
+      border-bottom:1px solid #444;
       cursor: pointer;
       }
     </style>
@@ -187,7 +187,7 @@ TEMPLATE="""<!doctype html>
     <button class="linkbutton">&lt;parent directory&gt;</button>
   </form>
   </div>
-  {% endif -%} 
+  {% endif -%}
   {% if allow_mkdir -%}
   <div id="row">
   <form action="/{{dirname}}" method="POST">
@@ -197,7 +197,7 @@ TEMPLATE="""<!doctype html>
     <button type="submit">new directory</button>
   </form>
   </div>
-  {% endif -%} 
+  {% endif -%}
   {% for s in subdirs -%}
   <div id="row">
   <form method="POST" action="{{prefix}}{{s["path"]}}">
@@ -212,12 +212,15 @@ TEMPLATE="""<!doctype html>
 </html>
 """
 
+
 class AccessError(Exception):
 
     def __init__(self, code, message):
         super().__init__(self, message, code)
 
+
 letsencrypt_data = dict()
+
 
 def get_all_user(config, section, access):
     result = set()
@@ -234,10 +237,12 @@ def get_all_user(config, section, access):
         result.update(set(config.getlist(section, u_access)))
     return result
 
+
 def init_actions(perms, user):
     u = perms.setdefault(user, dict())
     for i in Access:
         u[i] = []
+
 
 def compute_permissions(config):
 
@@ -246,10 +251,10 @@ def compute_permissions(config):
             return config.get(section, "password")
         else:
             return base64.b64decode(config.get(section, "b64_password")).decode("utf8")
-    
+
     user_perms = { UNAUTH: { "creds" : None } }
     init_actions(user_perms, UNAUTH)
-        
+
     for section in config.sections():
         if section.startswith("user:"):
             user = section[5:]
@@ -277,7 +282,7 @@ def load_config():
     def get_list(conf, section, option, **kwargs):
         value = conf.get(section, option, **kwargs).strip()
         return [x.strip() for x in value.split(",")] if value else []
-    
+
     parser = argparse.ArgumentParser(prog='file upload server')
     parser.add_argument("--config",
                     help="configuration file location",
@@ -291,15 +296,15 @@ def load_config():
     config.read(args.config)
     # normalize basedir
     config.set("global", "basedir", os.path.abspath(config.get("global","basedir")))
-    
+
     compute_permissions(config)
     return config
 
 def setup_logging():
     log_config = json.loads(config.get("logging", "config"))
     dictConfig(log_config)
-            
-def setup_app(): 
+
+def setup_app():
     # create data dirs, if needed
     basedir = config.get("global", "basedir")
     for section in config.sections():
@@ -307,7 +312,7 @@ def setup_app():
             dir_name = os.path.join(basedir, section[4:])
             if not os.access(dir_name, os.R_OK | os.X_OK | os.W_OK):
                 os.makedirs(dir_name)
-            
+
     app = Flask(__name__)
     app.config['DEBUG'] = config.getboolean("global", "debug")
     return app
@@ -323,18 +328,21 @@ def run_server(app):
         server.append(https_server)
 
     if config.has_option("global", "http_port"):
-        http_server = WSGIServer((config.get("global", "host"), config.getint("global", "http_port")),
-                                     app)
+        http_server = WSGIServer((config.get("global", "host"),
+                                  config.getint("global", "http_port")),
+                                 app)
         http_server.start()
         server.append(http_server)
-        
+
     return server
-    
+
+
 config = load_config()
 
 setup_logging()
 
 app = setup_app()
+
 
 @app.after_request
 def after_request(response):
@@ -342,24 +350,31 @@ def after_request(response):
     response.headers.add('Accept-Ranges', 'bytes')
     return response
 
+
 def mk_fernet_key(path):
     key_str = config.get("global", "secret")
-    sha256 = digest = hashes.Hash(hashes.SHA256(), backend=default_backend())
+    sha256 = hashes.Hash(hashes.SHA256(), backend=default_backend())
     sha256.update(key_str.encode("ascii"))
     key = sha256.finalize()
     return base64.urlsafe_b64encode(key)
 
+
 def mk_auth(user, password, path):
+    if user is None:
+        user = ""
+    if password is None:
+        password = ""
     key = mk_fernet_key(path)
     f = Fernet(key)
     return f.encrypt((user + ":" + password).encode("utf8")).decode("ascii")
-    
+
+
 def get_user_from_request(path):
     try:
         # form keys first
         user = request.values.get("user", None)
         password = request.values.get("password", None)
-        
+
         if user is not None and password is not None:
             return user, password
 
@@ -380,10 +395,11 @@ def get_user_from_request(path):
             f = Fernet(key)
             cred = f.decrypt(auth.encode("utf8")).decode("utf8")
             return cred.split(":", 1)
-        
-    except:
+
+    except Exception:
         logging.info("Error", exc_info=True)
     return UNAUTH, None
+
 
 def get_user(path=None):
     """Get username either from cookie, basic auth header, or form keys"""
@@ -394,7 +410,7 @@ def get_user(path=None):
         logging.getLogger(__name__).info("%s - - User %s active", request.remote_addr, user)
         cred = base64.b64encode(("%s:%s" % (user, password)).encode("ascii")).decode("ascii")
         return user, password, cred
-    
+
     logging.getLogger(__name__).warn("%s - - Anonymous active %s:%s", request.remote_addr, user, password)
     return UNAUTH, None, ""
 
@@ -437,65 +453,84 @@ def upload_file(user, cred, directory):
     name = os.path.join(directory, fname)
     fullname = os.path.join(config.get("global","basedir"), name)
     if not fname:
-        return redirect(url_for("handle", cred=cred, path=directory, status="invalid filename"), code=302) 
+        return redirect(url_for("handle", cred=cred, path=directory, status="invalid filename"), code=302)
     if os.access(fullname, os.R_OK):
         return Response("duplicate", 403)
     file.save(fullname)
     logging.info("%s - - File %s uploaded by %s", request.remote_addr, name, user)
     size = os.lstat(fullname).st_size
-    return redirect(url_for("handle", cred=cred, path=directory, status="%d bytes saved as %s" % (size, fname)),
+    return redirect(url_for("handle", cred=cred, path=directory,
+                            status="%d bytes saved as %s" % (size, fname)),
                     code=302)
-    
+
+
 def delete_file(user, cred, dirname, filename):
     name = os.path.join(dirname, filename)
-    fullname = os.path.join(config.get("global","basedir"), name)
+    fullname = os.path.join(config.get("global", "basedir"), name)
     try:
         os.remove(fullname)
-        logging.getLogger(__name__).info("%s - - File %s deleted by %s", request.remote_addr, fullname, user)
-        return redirect(url_for("handle", cred=cred, path=dirname, status="File %s deleted" % name),
-                                code=302)
-    except:
-        logging.error("%s - - Failed to delete %s by %s", request.remote_addr, fullname, user)
+        logging.getLogger(__name__).info("%s - - File %s deleted by %s",
+                                         request.remote_addr,
+                                         fullname,
+                                         user)
+        return redirect(url_for("handle", cred=cred, path=dirname,
+                                status="File %s deleted" % name),
+                        code=302)
+    except Exception:
+        logging.error("%s - - Failed to delete %s by %s",
+                      request.remote_addr,
+                      fullname,
+                      user)
     return Response("permission denied", 403)
 
+
 def make_dir(user, cred, dirname):
-    filename = fname = text.get_valid_filename(request.values["dirname"])
+    filename = text.get_valid_filename(request.values["dirname"])
     name = os.path.join(dirname, filename)
-    fullname = os.path.join(config.get("global","basedir"), name)
+    fullname = os.path.join(config.get("global", "basedir"), name)
     try:
         os.makedirs(fullname)
-        logging.getLogger(__name__).info("%s - - Directory %s created by %s", request.remote_addr, fullname, user)
-        return redirect(url_for("handle", cred=cred, path=dirname, status="Directory %s created" % name),
-                                code=302)
-    except:
-        logging.error("%s - - Failed to create directory %s by %s", request.remote_addr, fullname, user)
+        logging.getLogger(__name__).info("%s - - Directory %s created by %s",
+                                         request.remote_addr,
+                                         fullname,
+                                         user)
+        return redirect(url_for("handle", cred=cred, path=dirname,
+                                status="Directory %s created" % name),
+                        code=302)
+    except Exception:
+        logging.error("%s - - Failed to create directory %s by %s",
+                      request.remote_addr,
+                      fullname,
+                      user)
     return Response("permission denied", 403)
+
 
 def get_mime_type(f):
     type = mimetypes.guess_type(f, strict=False)[0]
     return type if type is not None else "application/octet-stream"
 
+
 def normalize_path(path):
     basedir = config.get("global", "basedir")
     name = os.path.abspath(os.path.join(basedir, path))
     path = name[len(basedir):].strip(os.path.sep)
-    
+
     if name != basedir and not name.startswith(basedir + os.path.sep):
         logging.warn("Outside base: %s", name)
         raise AccessError(403, "forbidden")
     try:
-        
+
         sr = os.stat(name)
     except FileNotFoundError:
         logging.warn("File not found: %s", name)
         raise AccessError(403, "forbidden")
-    except:
+    except Exception:
         logging.error("Stat error on %s", name)
         raise AccessError(403, "forbidden")
 
     if sr.st_uid != os.geteuid():
         logging.warn("Wrong owner found for %s", name)
-    
+
     if stat.S_ISDIR(sr.st_mode):
         return name, path, None
 
@@ -522,7 +557,7 @@ def has_access(user, dirname, action):
         if len(dirname) == 0 or dirname == os.path.sep:
             return False
         dirname, _ = os.path.split(dirname)
-        
+
 def list_dir(dirname):
     names = os.listdir(dirname)
     dirs = []
@@ -542,25 +577,32 @@ def list_dir(dirname):
             logging.exception("Error in list_dir(%s)", dirname)
     return dirs, files
 
+
 def filter_file_list(user, dirname, subdirs, files):
     files.sort()
     subdirs.sort()
     if not has_access(user, dirname, Access.LIST):
         files.clear()
-    
+
     for d in subdirs[:]:
-        if not (has_access(user, os.path.join(dirname,d), Access.LIST)
-                    or has_access(user, os.path.join(dirname,d), Access.UPLOAD)
-                    or has_access(user, os.path.join(dirname,d), Access.MKDIR)):
+        path = os.path.join(dirname, d)
+        if not (has_access(user, path, Access.LIST)
+                or has_access(user, path, Access.UPLOAD)
+                or has_access(user, path, Access.MKDIR)):
             subdirs.remove(d)
+
 
 def mk_prefix():
     return "http%s://%s/" % ("s" if request.is_secure else "", request.host)
 
+
 @app.route("/privacy", methods=["POST"])
 def privacy():
     user, password, cred = get_user()
-    return redirect(url_for("handle", path="", cred=cred, status="This server does not log or store any personal data."), code=302) 
+    return redirect(url_for("handle", path="", cred=cred,
+                            status="This server does not log or store any personal data."),
+                    code=302)
+
 
 def streamfile(fullname):
 
@@ -573,34 +615,44 @@ def streamfile(fullname):
                 if offset + chunk > length:
                     chunk = length - offset
                 offset += chunk
-                logging.getLogger(__name__).debug("Sending %d-%d of %s", start+offset, start+offset+length, filename)
+                logging.getLogger(__name__).debug("Sending %d-%d of %s",
+                                                  start+offset,
+                                                  start+offset+length,
+                                                  filename)
                 yield f.read(chunk)
-    
+
     range_header = request.headers.get('Range', None)
     if not range_header:
         resp = send_file(fullname, mimetype=get_mime_type(fullname))
         resp.make_conditional(request)
         return resp
-    
-    size = os.path.getsize(fullname)    
+
+    size = os.path.getsize(fullname)
     byte1, byte2 = 0, None
-    
-    m = re.search('(\d+)-(\d*)', range_header)
+
+    m = re.search(r'(\d+)-(\d*)', range_header)
     g = m.groups()
-    
-    if g[0]: byte1 = int(g[0])
-    if g[1]: byte2 = int(g[1])
+
+    if g[0]:
+        byte1 = int(g[0])
+    if g[1]:
+        byte2 = int(g[1])
 
     length = size - byte1
     if byte2 is not None:
         length = min(byte2 - byte1 + 1, length)
 
     resp = Response(send_chunks_iter(fullname, byte1, length),
-            206,
-            mimetype=get_mime_type(fullname),
-            direct_passthrough=True)
-    resp.headers.add('Content-Range', 'bytes {0}-{1}/{2}'.format(byte1, byte1 + length - 1, size))
+                    206,
+                    mimetype=get_mime_type(fullname),
+                    direct_passthrough=True)
+    resp.headers.add('Content-Range',
+                     'bytes {0}-{1}/{2}'.format(byte1,
+                                                byte1 + length - 1,
+                                                size)
+                     )
     return resp
+
 
 @app.route('/', defaults={'path': ''}, methods=["GET", "POST"])
 @app.route('/<path:path>', methods=["GET", "POST"])
@@ -611,13 +663,13 @@ def handle(path):
     fullname, dirname, fname = normalize_path(path)
 
     action = request.values.get("action", None)
-    
-    if fname is None and action in [ None, "list"]:
+
+    if fname is None and action in [None, "list"]:
         if not (has_access(user, dirname, Access.LIST)
-                    or has_access(user, dirname, Access.UPLOAD)
-                    or has_access(user, dirname, Access.MKDIR)):
+                or has_access(user, dirname, Access.UPLOAD)
+                or has_access(user, dirname, Access.MKDIR)):
             raise AccessError(403, "forbidden")
-        
+
         subdirs, files = list_dir(fullname)
         filter_file_list(user, dirname, subdirs, files)
         status = request.values.get("status", None)
@@ -627,10 +679,14 @@ def handle(path):
                 dirname=dirname,
                 parentdir=None if not dirname else os.path.split(dirname)[0],
                 prefix=mk_prefix(),
-                files=[ { "name" : f,
-                          "path" : os.path.join(dirname, f),
-                          "auth" : mk_auth(user, password, os.path.join(dirname, f))} for f in files],
-                subdirs=[ { "name" : s, "path" : os.path.join(dirname, s) } for s in subdirs],
+                files=[{"name": f,
+                        "path": os.path.join(dirname, f),
+                        "auth": mk_auth(user, password,
+                                        os.path.join(dirname, f))}
+                       for f in files],
+                subdirs=[{"name": s,
+                          "path": os.path.join(dirname, s)}
+                         for s in subdirs],
                 status=status,
                 allow_upload=has_access(user, dirname, Access.UPLOAD),
                 allow_delete=has_access(user, dirname, Access.DELETE),
@@ -660,18 +716,20 @@ def handle(path):
 
     elif fname and action is None:
         if has_access(user, dirname, Access.FETCH):
-            logging.getLogger(__name__).info("%s - - Download %s by %s", request.remote_addr, fullname, user)
+            logging.getLogger(__name__).info("%s - - Download %s by %s",
+                                             request.remote_addr,
+                                             fullname,
+                                             user)
             resp = streamfile(fullname)
         else:
             raise AccessError(403, "forbidden")
-    
+
     return resp
 
-server = run_server(app)
 
-while True:
-    gevent.sleep(60)
+#server = run_server(app)
 
-app.run(host="127.0.0.1", port=config.getint("global", "http_port"), debug=True)
+#while True:
+#    gevent.sleep(60)
 
 
