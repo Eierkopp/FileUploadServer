@@ -24,12 +24,16 @@ from django.utils import text
 from flask import Flask, request, Response, render_template_string, \
     send_file, redirect, url_for
 
-from pyftpdlib.authorizers import AuthenticationFailed
-from pyftpdlib.filesystems import AbstractedFS, FilesystemError
-from pyftpdlib.handlers import FTPHandler
-from pyftpdlib.servers import FTPServer
+try:
+    from pyftpdlib.authorizers import AuthenticationFailed
+    from pyftpdlib.filesystems import AbstractedFS, FilesystemError
+    from pyftpdlib.handlers import FTPHandler
+    from pyftpdlib.servers import FTPServer
 
-from configparser import ConfigParser, ExtendedInterpolation
+except ModuleNotFoundError:
+    AbstractedFS = object
+
+from configparser import ConfigParser, ExtendedInterpolation, NoOptionError
 
 
 class Access(Enum):
@@ -898,17 +902,34 @@ class MyFilesystem(AbstractedFS):
 
 def make_ftp_server():
 
-    ftp_handler = FTPHandler
-    ftp_handler.authorizer = MyAuthorizer()
-    ftp_handler.abstracted_fs = MyFilesystem
+    class DummyFtpServer:
+        """Just a mock to make the FTP code happy when
+        there is no server available"""
 
-    ftp_handler.banner = "fus at your service."
-    address = (config.get("global", "host"),
-               config.getint("global", "ftp_port"))
-    ftp_server = FTPServer(address, ftp_handler)
-    ftp_server.set_reuse_addr()
+        def serve_forever(self, *args, **kwargs):
+            pass
 
-    return ftp_server
+        def close_all(self, *args, **kwargs):
+            pass
+
+    try:
+        ftp_handler = FTPHandler
+        ftp_handler.authorizer = MyAuthorizer()
+        ftp_handler.abstracted_fs = MyFilesystem
+
+        ftp_handler.banner = "fus at your service."
+        address = (config.get("global", "host"),
+                   config.getint("global", "ftp_port"))
+        ftp_server = FTPServer(address, ftp_handler)
+        ftp_server.set_reuse_addr()
+
+        return ftp_server
+    except NoOptionError:
+        logging.warning("Not running FTP server, is 'ftp_port' configured?")
+    except Exception:
+        logging.warning("Not running FTP server, is pyftpdlib available?")
+
+    return DummyFtpServer()
 
 
 ftp_server = make_ftp_server()
