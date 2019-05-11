@@ -10,7 +10,8 @@ ExecStop=/bin/kill -s TERM $MAINPID
 PrivateTmp=true
 User=fus
 Group=fus
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_BIND_SERVICE
 
 [Install]
 WantedBy=multi-user.target
+
