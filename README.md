@@ -1,6 +1,6 @@
 # FileUploadServer
 
-Small HTTP(S) server to share some files.
+Small HTTP(S)/FTP server to share some files.
 
 Inspired by droopy but with support for
 
@@ -8,7 +8,7 @@ Inspired by droopy but with support for
 - muliple accounts
 - letsencrypt certificate renewal
 
-## Letsencrypt Support (untested)
+## Letsencrypt Support (mostly untested)
 
 Letsencrypt certificate renewal offers a HTTP01_challenge consisting of
 `token` and `thumb` to be downloadable from URL
@@ -27,7 +27,7 @@ GET to URL
     Server: Werkzeug/0.12.2-dev Python/3.6.3
     Date: Mon, 20 Nov 2017 10:24:55 GMT
 
-    ok
+    ok 
 
 Now the challenge will be answered:
 
@@ -40,8 +40,28 @@ Now the challenge will be answered:
 
     some_token.some_thumb%
 
+## Building
+
+`$ build.sh` will build a Debian package.
 
 ## Installation
 
+`$ sudo dpkg -i fus_1.1.0_all.deb` installs the package. It is
+integrated with systemd, hence:
+
+Startup: `$ sudo systemctl start fus.service`
+
+Stopping: `$ systemcts stop fus.service`
+
+Autostart after reboot: `$systemctl enable fus.service`
+
+Status: `$ sudo systemctl status fus.conf`
+
+Troubleshooting: e.g. `$ sudo journalctl -xe`
 
 
+Configuration is in /etc/fus.conf. 
+
+
+
+ 

@@ -109,6 +109,5 @@ debian/fus/lib
 
 
 README.pdf
-auto_build.sh
 etc/fus_devel.conf
 *~
