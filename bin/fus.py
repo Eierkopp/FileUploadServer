@@ -3,6 +3,7 @@
 import argparse
 import base64
 from enum import Enum
+from http import HTTPStatus
 import json
 import logging
 from logging.config import dictConfig
@@ -13,9 +14,6 @@ import stat
 import threading
 import types
 from functools import wraps
-from cryptography.fernet import Fernet
-from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.backends import default_backend
 
 import gevent
 from gevent.pywsgi import WSGIServer
@@ -55,20 +53,21 @@ TEMPLATE = """<!doctype html>
     <title>File Upload Server for {{user}}</title>
     <style>
       #head {
-      border: 2px solid black;
       overflow: hidden:
       position: relative;
-      display: table;
-      clear: both;
+      display: grid;
+      grid-template-columns: 1fr auto;
       width: 100%;
       }
       #msgbox {
       vertical-align: top;
       float: left;
+      border: 1px solid black;
       }
       #loginbox {
       vertical-align: top;
       float: right;
+      border: 1px solid black;
       }
       a {
       color: blue;
@@ -122,10 +121,7 @@ TEMPLATE = """<!doctype html>
       </div>
       {% else -%}
       <div id="privacy">
-        <form method="POST" action="/privacy">
-          <input type="hidden" name="cred" value="{{cred}}"/>
-          <button class="linkbutton" type="submit">privacy</button>
-        </form>
+        <a href="/privacy/{{dirname}}">privacy</a>
       </div>
       {% endif -%}
     </div>
@@ -137,7 +133,7 @@ TEMPLATE = """<!doctype html>
               <label>User</label>
             </td>
             <td>
-              <input type="text" name="user" maxlength="30">
+              <input type="text" name="user"  value="{{user}}" maxlength="30">
             </td>
           </tr>
           <tr>
@@ -149,10 +145,9 @@ TEMPLATE = """<!doctype html>
             </td>
           </tr>
           <tr>
-            <td>
+            <td colspan="2">
               <button type="submit">sign in</button>
             </td>
-            <td/>
           </tr>
         </table>
       </form>
@@ -161,9 +156,9 @@ TEMPLATE = """<!doctype html>
   <div id="content">
   {% if allow_upload -%}
   <hr class="fullhr">
-  <form action="/{{dirname}}?action=upload" method="post" enctype="multipart/form-data">
+  <form action="/{{dirname}}" method="post" enctype="multipart/form-data">
     <input type="file" name="file" />
-    <input type="hidden" name="cred" value="{{cred}}" />
+    <input type="hidden" name="action" value="upload" />
     <button type="submit">upload</button>
   </form>
   {% endif -%}
@@ -174,7 +169,11 @@ TEMPLATE = """<!doctype html>
   <div id="row">
   </div>
   {% if allow_fetch -%}
-  <div id="link"><a href="{{prefix}}{{f["path"]}}?auth={{f["auth"]}}">{{f["name"]}}</a></div>
+  <div id="link">
+    <a href="{{prefix}}{{f["path"]}}">
+      {{f["name"]}}
+    </a>
+  </div>
   <div id="full_link">{{prefix}}{{f["path"]}}</div>
   {% else -%}
   {{f["name"]}}
@@ -182,7 +181,6 @@ TEMPLATE = """<!doctype html>
   {% if allow_delete -%}
   <form action="/{{f["path"]}}" method="post">
     <input type="hidden" name="action" value="delete" />
-    <input type="hidden" name="cred" value="{{cred}}" />
     <button type="submit">delete</button>
   </form>
   {% endif -%}
@@ -193,17 +191,15 @@ TEMPLATE = """<!doctype html>
   {% if parentdir != None -%}
   <div id="row">
   <div id="link">
-    <form method="POST" action="{{prefix}}{{parentdir}}">
-    <input type="hidden" name="cred" value="{{cred}}"/>
-    <button class="linkbutton">&lt;parent directory&gt;</button>
-  </form>
+    <a href="{{prefix}}{{parentdir}}">
+      &lt;parent directory&gt;
+    </a>
   </div>
   {% endif -%}
   {% if allow_mkdir -%}
   <div id="row">
   <form action="/{{dirname}}" method="POST">
     <input type="hidden" name="action" value="mkdir" />
-    <input type="hidden" name="cred" value="{{cred}}"/>
     <input type="text" name="dirname" />
     <button type="submit">new directory</button>
   </form>
@@ -211,9 +207,9 @@ TEMPLATE = """<!doctype html>
   {% endif -%}
   {% for s in subdirs -%}
   <div id="row">
-  <form method="POST" action="{{prefix}}{{s["path"]}}">
-    <input type="hidden" name="cred" value="{{cred}}"/>
-    <button class="linkbutton">{{s["name"]}}</button>
+  <a href="{{prefix}}{{s["path"]}}">
+    {{s["name"]}}
+  </a>
   </form>
   </div>
   {% endfor -%}
@@ -237,11 +233,14 @@ def get_all_user(config, section, access):
     result = set()
     g_access = "%s_groups" % access.value
     u_access = "%s_user" % access.value
-    groups = config.getlist(section, g_access) if config.has_option(section, g_access) else []
+    if config.has_option(section, g_access):
+        groups = config.getlist(section, g_access)
+    else:
+        groups = []
     group_sections = ["group:" + s for s in groups]
     for gs in group_sections:
         if not config.has_section(gs):
-            logging.getLogger(__name__).error("No section '%s'", gs)
+            logging.error("No section '%s'", gs)
             continue
         result.update(set(config.getlist(gs, "user")))
     if config.has_option(section, u_access):
@@ -261,7 +260,8 @@ def compute_permissions(config):
         if config.has_option(section, "password"):
             return config.get(section, "password")
         else:
-            return base64.b64decode(config.get(section, "b64_password")).decode("utf8")
+            bytebuf = base64.b64decode(config.get(section, "b64_password"))
+            return bytebuf.decode("utf8")
 
     user_perms = {UNAUTH: {"creds": None}}
     init_actions(user_perms, UNAUTH)
@@ -281,7 +281,7 @@ def compute_permissions(config):
                 all_user = get_all_user(config, section, access)
                 for user in all_user:
                     if user not in user_perms:
-                        logging.getLogger(__name__).error("User '%s' unconfigured", user)
+                        logging.error("User '%s' unconfigured", user)
                         continue
                     user_perms[user][access].append(dir_name)
     config.user_perms = user_perms
@@ -368,24 +368,6 @@ def after_request(response):
     return response
 
 
-def mk_fernet_key(path):
-    key_str = config.get("global", "secret")
-    sha256 = hashes.Hash(hashes.SHA256(), backend=default_backend())
-    sha256.update(key_str.encode("ascii"))
-    key = sha256.finalize()
-    return base64.urlsafe_b64encode(key)
-
-
-def mk_auth(user, password, path):
-    if user is None:
-        user = ""
-    if password is None:
-        password = ""
-    key = mk_fernet_key(path)
-    f = Fernet(key)
-    return f.encrypt((user + ":" + password).encode("utf8")).decode("ascii")
-
-
 def get_user_from_request(path):
     try:
         # form keys first
@@ -400,18 +382,10 @@ def get_user_from_request(path):
         if auth:
             return auth["username"], auth["password"]
 
-        # credentials from cred form key
-        cred = request.values.get("cred", None)
+        # credentials from cred cookie
+        cred = request.cookies.get("cred", None)
         if cred:
             return base64.b64decode(cred).decode("utf8").split(":", 1)
-
-        # encrypted credentials from auth url param
-        auth = request.args.get("auth", None)
-        if auth:
-            key = mk_fernet_key(path)
-            f = Fernet(key)
-            cred = f.decrypt(auth.encode("utf8")).decode("utf8")
-            return cred.split(":", 1)
 
     except Exception:
         logging.info("Error", exc_info=True)
@@ -424,14 +398,13 @@ def get_user(path=None):
     user, password = get_user_from_request(path)
 
     if config.user_perms.get(user, dict()).get("creds", None) == password:
-        logging.getLogger(__name__).info("%s - - User %s active",
-                                         request.remote_addr, user)
+        logging.info("%s - - User %s active", request.remote_addr, user)
         cred = ("%s:%s" % (user, password)).encode("ascii")
         cred = base64.b64encode(cred).decode("ascii")
         return user, password, cred
 
-    logging.getLogger(__name__).warning("%s - - Anonymous active %s:%s",
-                                        request.remote_addr, user, password)
+    logging.warning("%s - - Anonymous active %s:%s",
+                    request.remote_addr, user, password)
     return UNAUTH, None, ""
 
 
@@ -441,8 +414,16 @@ def redirect_on_exception(func):
         try:
             return func(*args, **kwargs)
         except AccessError as e:
+            code = e.args[2]
             logging.getLogger(__name__).error("AccessError in function")
-            return Response(e.args[1], e.args[2], mimetype="text/plain")
+            print(code)
+            if code == 401:
+                return Response('Unauthorized',
+                                code,
+                                {'WWW-Authenticate': 'Basic realm="fus login"'}
+                                )
+            else:
+                return Response(e.args[1], code, mimetype="text/plain")
         except Exception:
             logging.getLogger(__name__).error("Error in function",
                                               exc_info=True)
@@ -452,7 +433,7 @@ def redirect_on_exception(func):
 
 @app.route("/favicon.ico", methods=["GET"])
 def favicon():
-    favicon = 'AAABAAEAEBAQjwAAAACoAQAAFgAAACgAAAAQAAAAIAAAAAEABAAAAAAAwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAAACAAAAAgIAAgAAAAIAAgACAgAAAgICAAMDAwAAAAP8AAP8AAAD//wD/AAAA/wD/AP//AAD///8AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB4h3AAAAAACIiI8AAAAAAI+I+AAAAAAAAAAAAAAAAAAId4AAAAAAAH939wAAAAAAdwB3AAAAAAAQAAEAAAAAALMAOwAAAAAAMAADAAAAAAAQAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA='
+    favicon = config.get("global", "favicon")
     return Response(base64.b64decode(favicon), mimetype="image/gif")
 
 
@@ -476,13 +457,13 @@ def upload_letsencrypt(token, thumb):
     return Response("ok", 200, mimetype="text/plain")
 
 
-def upload_file(user, cred, directory):
+def upload_file(user, directory):
     file = request.files['file']
     fname = text.get_valid_filename(os.path.basename(file.filename))
     name = os.path.join(directory, fname)
     fullname = os.path.join(config.get("global", "basedir"), name)
     if not fname:
-        return redirect(url_for("handle", cred=cred, path=directory,
+        return redirect(url_for("handle", path=directory,
                                 status="invalid filename"),
                         code=302)
     if os.access(fullname, os.R_OK):
@@ -491,12 +472,12 @@ def upload_file(user, cred, directory):
     logging.info("%s - - File %s uploaded by %s",
                  request.remote_addr, name, user)
     size = os.lstat(fullname).st_size
-    return redirect(url_for("handle", cred=cred, path=directory,
+    return redirect(url_for("handle", path=directory,
                             status="%d bytes saved as %s" % (size, fname)),
                     code=302)
 
 
-def delete_file(user, cred, dirname, filename):
+def delete_file(user, dirname, filename):
     name = os.path.join(dirname, filename)
     fullname = os.path.join(config.get("global", "basedir"), name)
     try:
@@ -505,7 +486,7 @@ def delete_file(user, cred, dirname, filename):
                                          request.remote_addr,
                                          fullname,
                                          user)
-        return redirect(url_for("handle", cred=cred, path=dirname,
+        return redirect(url_for("handle", path=dirname,
                                 status="File %s deleted" % name),
                         code=302)
     except Exception:
@@ -516,7 +497,7 @@ def delete_file(user, cred, dirname, filename):
     return Response("permission denied", 403)
 
 
-def make_dir(user, cred, dirname):
+def make_dir(user, dirname):
     filename = text.get_valid_filename(request.values["dirname"])
     name = os.path.join(dirname, filename)
     fullname = os.path.join(config.get("global", "basedir"), name)
@@ -526,7 +507,7 @@ def make_dir(user, cred, dirname):
                                          request.remote_addr,
                                          fullname,
                                          user)
-        return redirect(url_for("handle", cred=cred, path=dirname,
+        return redirect(url_for("handle", path=dirname,
                                 status="Directory %s created" % name),
                         code=302)
     except Exception:
@@ -630,11 +611,13 @@ def mk_prefix():
     return "http%s://%s/" % ("s" if request.is_secure else "", request.host)
 
 
-@app.route("/privacy", methods=["POST"])
-def privacy():
+@app.route("/privacy", defaults={'path': ''}, methods=["GET", "POST"])
+@app.route("/privacy/", defaults={'path': ''}, methods=["GET", "POST"])
+@app.route("/privacy/<path:path>", methods=["GET", "POST"])
+def privacy(path):
     user, password, cred = get_user()
-    return redirect(url_for("handle", path="", cred=cred,
-                            status="This server does not log or store any personal data."),
+    return redirect(url_for("handle", path=path,
+                            status=config.get("global", "gdprmsg")),
                     code=302)
 
 
@@ -702,7 +685,7 @@ def handle(path):
         if not (has_access(user, dirname, Access.LIST)
                 or has_access(user, dirname, Access.UPLOAD)
                 or has_access(user, dirname, Access.MKDIR)):
-            raise AccessError(403, "forbidden")
+            raise AccessError(HTTPStatus.UNAUTHORIZED, "forbidden")
 
         subdirs, files = list_dir(fullname)
         filter_file_list(user, dirname, subdirs, files)
@@ -714,9 +697,7 @@ def handle(path):
                 parentdir=None if not dirname else os.path.split(dirname)[0],
                 prefix=mk_prefix(),
                 files=[{"name": f,
-                        "path": os.path.join(dirname, f),
-                        "auth": mk_auth(user, password,
-                                        os.path.join(dirname, f))}
+                        "path": os.path.join(dirname, f)}
                        for f in files],
                 subdirs=[{"name": s,
                           "path": os.path.join(dirname, s)}
@@ -727,24 +708,24 @@ def handle(path):
                 allow_fetch=has_access(user, dirname, Access.FETCH),
                 allow_mkdir=has_access(user, dirname, Access.MKDIR),
                 debug=config.getboolean("global", "debug"),
-                user=user,
-                cred=cred))
+                user=user)
+            )
 
     elif fname is None and action == "upload":
         if has_access(user, dirname, Access.UPLOAD):
-            resp = upload_file(user, cred, dirname)
+            resp = upload_file(user, dirname)
         else:
             raise AccessError(403, "forbidden")
 
     elif fname and action == "delete":
         if has_access(user, dirname, Access.DELETE):
-            resp = delete_file(user, cred, dirname, fname)
+            resp = delete_file(user, dirname, fname)
         else:
             raise AccessError(403, "forbidden")
 
     elif fname is None and action == "mkdir":
         if has_access(user, dirname, Access.MKDIR):
-            resp = make_dir(user, cred, dirname)
+            resp = make_dir(user, dirname)
         else:
             raise AccessError(403, "forbidden")
 
@@ -758,6 +739,7 @@ def handle(path):
         else:
             raise AccessError(403, "forbidden")
 
+    resp.set_cookie("cred", cred)
     return resp
 
 #

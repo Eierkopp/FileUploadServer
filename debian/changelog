@@ -1,3 +1,11 @@
+fus (1.2.0) unstable; urgency=medium
+
+	* Add FTP support
+	* Use cookie to store credentials
+	* Configurable GDPR message
+
+ -- Depperter Depp <depp@eierkopp.ddnss.org>  Sun, 12 May 2019 16:02:00 +0200
+
 fus (1.1.0) unstable; urgency=medium
 
   * Allow nested directories
