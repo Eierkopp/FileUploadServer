@@ -1,0 +1,11 @@
+{
+    "DEFAULT_DIRECTORY_URL": "https://acme-v02.api.letsencrypt.org/directory",
+    "DOMAINS": ["my.primary.domain", "my.other.domain"],
+    "ACCOUNT_KEY": "account.key",
+    "DOMAIN_KEY": "domain.key",
+    "MIN_CERT_VALIDITY_DAYS": 20,
+    "CRT_FILE": "/etc/ssl/certs/NAME.crt",
+    "KEY_FILE": "/etc/ssl/private/NAME.key",
+    "INTERMEDIATE_CERTS": "letsencrypt_intermediate.crt",
+    "INSTALL_SCRIPTS": ["./install.sh"]
+}

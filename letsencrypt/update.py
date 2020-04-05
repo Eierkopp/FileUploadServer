@@ -4,62 +4,18 @@ import base64
 import binascii
 import datetime
 import dateutil.parser
-import dbus
 import hashlib
 import json
 import logging
 import os
-from pprint import pprint
 import pytz
 import requests
+import subprocess
 import time
 import OpenSSL
 
 
-DEFAULT_DIRECTORY_URL = "https://acme-v02.api.letsencrypt.org/directory"
-DOMAIN = "domain.name"
-ACCOUNT_KEY = "account.key"
-DOMAIN_KEY = "domain.key"
-MIN_CERT_VALIDITY_DAYS = 20
-
-
-INTERMEDIATE_CERT = b"""-----BEGIN CERTIFICATE-----
-MIIFjTCCA3WgAwIBAgIRANOxciY0IzLc9AUoUSrsnGowDQYJKoZIhvcNAQELBQAw
-TzELMAkGA1UEBhMCVVMxKTAnBgNVBAoTIEludGVybmV0IFNlY3VyaXR5IFJlc2Vh
-cmNoIEdyb3VwMRUwEwYDVQQDEwxJU1JHIFJvb3QgWDEwHhcNMTYxMDA2MTU0MzU1
-WhcNMjExMDA2MTU0MzU1WjBKMQswCQYDVQQGEwJVUzEWMBQGA1UEChMNTGV0J3Mg
-RW5jcnlwdDEjMCEGA1UEAxMaTGV0J3MgRW5jcnlwdCBBdXRob3JpdHkgWDMwggEi
-MA0GCSqGSIb3DQEBAQUAA4IBDwAwggEKAoIBAQCc0wzwWuUuR7dyXTeDs2hjMOrX
-NSYZJeG9vjXxcJIvt7hLQQWrqZ41CFjssSrEaIcLo+N15Obzp2JxunmBYB/XkZqf
-89B4Z3HIaQ6Vkc/+5pnpYDxIzH7KTXcSJJ1HG1rrueweNwAcnKx7pwXqzkrrvUHl
-Npi5y/1tPJZo3yMqQpAMhnRnyH+lmrhSYRQTP2XpgofL2/oOVvaGifOFP5eGr7Dc
-Gu9rDZUWfcQroGWymQQ2dYBrrErzG5BJeC+ilk8qICUpBMZ0wNAxzY8xOJUWuqgz
-uEPxsR/DMH+ieTETPS02+OP88jNquTkxxa/EjQ0dZBYzqvqEKbbUC8DYfcOTAgMB
-AAGjggFnMIIBYzAOBgNVHQ8BAf8EBAMCAYYwEgYDVR0TAQH/BAgwBgEB/wIBADBU
-BgNVHSAETTBLMAgGBmeBDAECATA/BgsrBgEEAYLfEwEBATAwMC4GCCsGAQUFBwIB
-FiJodHRwOi8vY3BzLnJvb3QteDEubGV0c2VuY3J5cHQub3JnMB0GA1UdDgQWBBSo
-SmpjBH3duubRObemRWXv86jsoTAzBgNVHR8ELDAqMCigJqAkhiJodHRwOi8vY3Js
-LnJvb3QteDEubGV0c2VuY3J5cHQub3JnMHIGCCsGAQUFBwEBBGYwZDAwBggrBgEF
-BQcwAYYkaHR0cDovL29jc3Aucm9vdC14MS5sZXRzZW5jcnlwdC5vcmcvMDAGCCsG
-AQUFBzAChiRodHRwOi8vY2VydC5yb290LXgxLmxldHNlbmNyeXB0Lm9yZy8wHwYD
-VR0jBBgwFoAUebRZ5nu25eQBc4AIiMgaWPbpm24wDQYJKoZIhvcNAQELBQADggIB
-ABnPdSA0LTqmRf/Q1eaM2jLonG4bQdEnqOJQ8nCqxOeTRrToEKtwT++36gTSlBGx
-A/5dut82jJQ2jxN8RI8L9QFXrWi4xXnA2EqA10yjHiR6H9cj6MFiOnb5In1eWsRM
-UM2v3e9tNsCAgBukPHAg1lQh07rvFKm/Bz9BCjaxorALINUfZ9DD64j2igLIxle2
-DPxW8dI/F2loHMjXZjqG8RkqZUdoxtID5+90FgsGIfkMpqgRS05f4zPbCEHqCXl1
-eO5HyELTgcVlLXXQDgAWnRzut1hFJeczY1tjQQno6f6s+nMydLN26WuU4s3UYvOu
-OsUxRlJu7TSRHqDC3lSE5XggVkzdaPkuKGQbGpny+01/47hfXXNB7HntWNZ6N2Vw
-p7G6OfY+YQrZwIaQmhrIqJZuigsrbe3W+gdn5ykE9+Ky0VgVUsfxo52mwFYs1JKY
-2PGDuWx8M6DlS6qQkvHaRUo0FMd8TsSlbF0/v965qGFKhSDeQoMpYnwcmQilRh/0
-ayLThlHLN81gSkJjVrPI0Y8xCVPB4twb1PFUd2fPM3sA1tJ83sZ5v8vgFv2yofKR
-PB0t6JzUA81mSqM3kxl5e+IZwhYAyO0OTg3/fs8HqGTNKd9BqoUwSRBzp06JMg5b
-rUCGwbCUDI0mxadJ3Bz4WxR6fyNpBK2yAinWEsikxqEt
------END CERTIFICATE-----"""
-
-LOCATIONS = [("/etc/ssl/certs/eierkopp.crt",
-              "/etc/ssl/private/eierkopp.key")]
-
-SERVICES = ["postfix", "dovecot"]
+SUCCESS_CODES = [200, 201, 202, 204]
 
 logging.basicConfig(level=logging.DEBUG)
 
@@ -75,15 +31,28 @@ def enc_num(n):
 
 
 def get_private_key(fname):
-    with open(fname) as f:
-        return OpenSSL.crypto.load_privatekey(OpenSSL.crypto.FILETYPE_PEM, f.read())
+    if os.access(fname, os.R_OK):
+        with open(fname) as f:
+            return OpenSSL.crypto.load_privatekey(OpenSSL.crypto.FILETYPE_PEM, f.read())
+    else:
+        key = OpenSSL.crypto.PKey()
+        key.generate_key(OpenSSL.crypto.TYPE_RSA, 4096)
+
+        with open(fname, "wb") as f:
+            f.write(OpenSSL.crypto.dump_privatekey(OpenSSL.crypto.FILETYPE_PEM, key))
+        return key
 
 
-def get_csr(domain, dkey):
+def get_csr(domains, dkey):
     csr = OpenSSL.crypto.X509Req()
-    csr.get_subject().CN = domain
-    csr.set_version(2)
+    csr.set_version(0)
     csr.set_pubkey(dkey)
+    if len(domains) == 1:
+        csr.get_subject().CN = domains[0]
+    else:
+        doms = ",".join("DNS:" + d for d in domains).encode("ascii")
+        ext = OpenSSL.crypto.X509Extension(b"subjectAltName", False, doms)
+        csr.add_extensions([ext])
     csr.sign(dkey, "sha256")
     bytes = OpenSSL.crypto.dump_certificate_request(OpenSSL.crypto.FILETYPE_ASN1, csr)
     return b64(bytes)
@@ -125,8 +94,8 @@ def make_request(url, header, payload, akey, directory):
                          headers={'content-type': 'application/jose+json'})
 
 
-def get_directory():
-    response = requests.get(DEFAULT_DIRECTORY_URL)
+def get_directory(dirname):
+    response = requests.get(dirname)
     return response.json()
 
 
@@ -138,7 +107,7 @@ def sign_in(header, akey, directory):
                         },
                         akey,
                         directory)
-    if resp.status_code in [200, 201, 204]:
+    if resp.status_code in SUCCESS_CODES:
         logging.getLogger(__name__).info("Account registered")
     elif resp.status_code == 409:
         logging.getLogger(__name__).info("Signed in to existing account")
@@ -147,8 +116,8 @@ def sign_in(header, akey, directory):
     return resp.json(), resp.headers
 
 
-def http01_challenge(data, directory):
-    resp = make_request(data["authorizations"][0],
+def http01_challenge(auth_url, header, akey, directory):
+    resp = make_request(auth_url,
                         header,
                         None,
                         akey,
@@ -184,46 +153,47 @@ def wait_for_verification(uri):
     raise Exception("Domain %s not verified" % uri)
 
 
-def authorize_domain(domain, header, thumb, akey, directory):
+def authorize_domain(domains, header, thumb, akey, directory):
     resp = make_request(directory["newOrder"],
                         header,
                         {
-                            "identifiers": [{"type": "dns", "value": domain}],
+                            "identifiers": [{"type": "dns", "value": domain} for domain in domains],
                         },
                         akey,
                         directory)
-    if resp.status_code != 201:
-        print(resp.text)
+    if resp.status_code not in SUCCESS_CODES:
         raise Exception("Error fetching challenges: {0} {1}".format(resp.status_code, resp.reason))
     order = resp.json()
-    pprint(order)
-    status, token, uri = http01_challenge(order, directory)
-    print(status, token, uri)
-    if status == "valid":
-        logging.getLogger(__name__).info("Domain %s already verified" % domain)
-        return order
+    for i, url in enumerate(order["authorizations"]):
+        domain = domains[i]
+        status, token, finalize_url = http01_challenge(url, header, akey, directory)
 
-    key = token + "." + thumb
+        if status == "valid":
+            logging.getLogger(__name__).info("Domain %s already verified" % domain)
+            continue
 
-    # push to fus
-    requests.get("http://%s/.well-known/acme-challenge/upload/%s/%s" % (domain, token, thumb))
-    wait_for_auth_file(domain, token, key)
+        key = token + "." + thumb
 
-    resp = make_request(uri,
-                        header,
-                        dict(),
-                        akey,
-                        directory)
-    if resp.status_code not in [200, 201, 202, 204]:
-        raise Exception("Error notifying server: {0} {1}".format(resp.status_code, resp.reason))
+        # push to fus
+        requests.get("http://%s/.well-known/acme-challenge/upload/%s/%s" % (domain, token, thumb))
+        wait_for_auth_file(domain, token, key)
+        logging.getLogger(__name__).info("Notifying server for domain %s" % domain)
+        resp = make_request(finalize_url,
+                            header,
+                            dict(),
+                            akey,
+                            directory)
+        if resp.status_code not in SUCCESS_CODES:
+            raise Exception("Error notifying server: {0} {1}".format(resp.status_code, resp.reason))
 
-    wait_for_verification(uri)
-    logging.getLogger(__name__).info("Domain %s verified" % domain)
+        wait_for_verification(finalize_url)
+        logging.getLogger(__name__).info("Domain %s verified" % domain)
     return order
 
 
-def fetch_certificate(finalize_url, domain, domain_key, header, akey, directory):
-    csr = get_csr(domain, domain_key)
+def fetch_certificate(finalize_url, domains, domain_key, header, akey, directory):
+    logging.getLogger(__name__).info("Fetching certificate")
+    csr = get_csr(domains, domain_key)
     resp = make_request(finalize_url,
                         header,
                         {
@@ -231,60 +201,66 @@ def fetch_certificate(finalize_url, domain, domain_key, header, akey, directory)
                         },
                         akey,
                         directory)
-    if resp.status_code not in [200, 201, 202, 204]:
-        raise Exception("Error fetching signed certificate for %s: %s %s"
-                        % (domain, resp.status_code, resp.reason))
+    if resp.status_code not in SUCCESS_CODES:
+        raise Exception("Error fetching status for %s: %s %s"
+                        % (domains, resp.status_code, resp.reason))
+    status = resp.json()
+    if status["status"] not in ["ready", "valid"]:
+        raise Exception("Certificate not ready")
 
-    return OpenSSL.crypto.load_certificate(OpenSSL.crypto.FILETYPE_ASN1, resp.content)
+    resp = make_request(status["certificate"],
+                        header,
+                        None,
+                        akey,
+                        directory)
+    if resp.status_code not in SUCCESS_CODES:
+        raise Exception("Error fetching certificate for %s: %s %s"
+                        % (domains, resp.status_code, resp.reason))
+
+    return OpenSSL.crypto.load_certificate(OpenSSL.crypto.FILETYPE_PEM, resp.content)
 
 
-def unpack_cert(target):
-    if isinstance(target, str):
-        return target, target
-    else:
-        return target
+def needs_update(crt_name, min_validity):
 
-
-def needs_update(targets):
-
-    for target in targets:
-        crt_name, _ = unpack_cert(target)
-        if not os.access(crt_name, os.R_OK):
-            logging.getLogger(__name__).warning("Cert %s missing, update required" % crt_name)
+    if not os.access(crt_name, os.R_OK):
+        logging.getLogger(__name__).warning("Cert %s missing, update required" % crt_name)
+        return True
+    with open(crt_name) as f:
+        crt = OpenSSL.crypto.load_certificate(OpenSSL.crypto.FILETYPE_PEM, f.read())
+        dt = dateutil.parser.parse(crt.get_notAfter())
+        valid_seconds = (dt - datetime.datetime.now(pytz.utc)).total_seconds()
+        if valid_seconds < 86400 * min_validity:
+            logging.getLogger(__name__).warning(
+                "Cert %s valid for only %d days" % (crt_name, int(valid_seconds / 86400)))
             return True
-        with open(crt_name) as f:
-            crt = OpenSSL.crypto.load_certificate(OpenSSL.crypto.FILETYPE_PEM, f.read())
-            dt = dateutil.parser.parse(crt.get_notAfter())
-            valid_seconds = (dt - datetime.datetime.now(pytz.utc)).total_seconds()
-            if valid_seconds < 86400 * MIN_CERT_VALIDITY_DAYS:
-                logging.getLogger(__name__).warning(
-                    "Cert %s valid for only %d days" % (crt_name, int(valid_seconds / 86400)))
-                return True
-            else:
-                logging.getLogger(__name__).info(
-                    "Cert %s valid for %d days" % (crt_name, int(valid_seconds / 86400)))
-    return False
+        else:
+            logging.getLogger(__name__).info(
+                "Cert %s valid for %d days" % (crt_name, int(valid_seconds / 86400)))
+            return False
 
 
-def install_cert(cert, key, targets):
-    for target in targets:
-        cert_name, key_name = unpack_cert(target)
+def install_cert(cert, key, cert_name, key_name, intermediate_name=None):
+    now = datetime.datetime.utcnow().replace(tzinfo=pytz.UTC)
+    date_str = now.strftime("%F_%T")
 
-        now = datetime.datetime.utcnow().replace(tzinfo=pytz.UTC)
-        date_str = now.strftime("%F_%T")
+    if os.access(key_name, os.R_OK):
+        os.rename(key_name, key_name + date_str)
 
-        if os.access(key_name, os.R_OK):
-            os.rename(key_name, key_name + date_str)
+    if os.access(cert_name, os.R_OK):
+        os.rename(cert_name, cert_name + date_str)
 
-        if os.access(cert_name, os.R_OK):
-            os.rename(cert_name, cert_name + date_str)
+    if intermediate_name is not None:
+        with open(intermediate_name, "rb") as f:
+            chain = f.read()
+    else:
+        chain = b""
 
-        with open(cert_name, "wb") as f:
-            f.write(OpenSSL.crypto.dump_certificate(OpenSSL.crypto.FILETYPE_PEM, cert))
-            f.write(b"\n")
-            f.write(INTERMEDIATE_CERT)
-        with open(key_name, "ab") as f:
-            f.write(OpenSSL.crypto.dump_privatekey(OpenSSL.crypto.FILETYPE_PEM, key))
+    with open(cert_name, "wb") as f:
+        f.write(OpenSSL.crypto.dump_certificate(OpenSSL.crypto.FILETYPE_PEM, cert))
+        f.write(chain)
+
+    with open(key_name, "wb") as f:
+        f.write(OpenSSL.crypto.dump_privatekey(OpenSSL.crypto.FILETYPE_PEM, key))
 
 
 def restart_service(service, manager):
@@ -292,58 +268,39 @@ def restart_service(service, manager):
     manager.TryRestartUnit(service, "fail")
 
 
-def restart_services(services):
-    sysbus = dbus.SystemBus()
-    systemd1 = sysbus.get_object('org.freedesktop.systemd1', '/org/freedesktop/systemd1')
-    manager = dbus.Interface(systemd1, 'org.freedesktop.systemd1.Manager')
-    jobs = manager.ListUnits()
-
-    for service in services:
-        if not service.endswith(".service"):
-            service = service + ".service"
-        for j in jobs:
-            if j[0] != service:
-                continue
-            if j[3] != "active":
-                logging.getLogger(__name__).warning("Service %s not running, ignored" % service)
-                continue
-
-            restart_service(service, manager)
-
-
 # swith to working directory
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
-for cert, key in LOCATIONS:
-    os.system("scp %s root@pi:%s" % (key, key))
-    os.system("scp %s root@pi:%s" % (cert, cert))
+with open("config.json", encoding="utf-8") as f:
+    config = json.load(f)
 
-if needs_update(LOCATIONS):
+if needs_update(config["CRT_FILE"], config["MIN_CERT_VALIDITY_DAYS"]):
 
-    akey = get_private_key(ACCOUNT_KEY)
-    dkey = get_private_key(DOMAIN_KEY)
+    akey = get_private_key(config["ACCOUNT_KEY"])
+    dkey = get_private_key(config["DOMAIN_KEY"])
     header = get_header(akey)
     account_thumb = get_account_print(header)
 
-    directory = get_directory()
+    directory = get_directory(config["DEFAULT_DIRECTORY_URL"])
     account, acct_header = sign_in(header, akey, directory)
 
     header.pop("jwk", None)
     header["kid"] = acct_header["location"]
 
-    order = authorize_domain(DOMAIN,
+    order = authorize_domain(config["DOMAINS"],
                              header,
                              account_thumb,
                              akey,
                              directory)
 
     cert = fetch_certificate(order["finalize"],
-                             DOMAIN,
+                             config["DOMAINS"],
                              dkey,
                              header,
                              akey,
                              directory)
 
-    install_cert(cert, dkey, LOCATIONS)
+    install_cert(cert, dkey, config["CRT_FILE"], config["KEY_FILE"], config["INTERMEDIATE_CERTS"])
 
-    restart_services(SERVICES)
+    for script in config["INSTALL_SCRIPTS"]:
+        subprocess.check_call(script)
