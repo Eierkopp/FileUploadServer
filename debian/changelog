@@ -1,8 +1,15 @@
+fus (1.3.0) unstable; urgency=medium
+
+  [ depp ]
+  * error 401 instead of 403
+
+ -- Depperter Depp <depp@eierkopp.ddnss.org>  Mon, 23 Nov 2020 09:12:00 +0200
+
 fus (1.2.0) unstable; urgency=medium
 
-	* Add FTP support
-	* Use cookie to store credentials
-	* Configurable GDPR message
+  * Add FTP support
+  * Use cookie to store credentials
+  * Configurable GDPR message
 
  -- Depperter Depp <depp@eierkopp.ddnss.org>  Sun, 12 May 2019 16:02:00 +0200
 
