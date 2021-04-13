@@ -494,7 +494,7 @@ def delete_file(user, dirname, filename):
                       request.remote_addr,
                       fullname,
                       user)
-    return Response("permission denied", 403)
+    return Response("permission denied", 401, {'WWW-Authenticate':'Basic realm="fus login"'})
 
 
 def make_dir(user, dirname):
@@ -515,7 +515,7 @@ def make_dir(user, dirname):
                       request.remote_addr,
                       fullname,
                       user)
-    return Response("permission denied", 403)
+    return Response("permission denied", 401, {'WWW-Authenticate':'Basic realm="fus login"'})
 
 
 def get_mime_type(f):
@@ -530,16 +530,16 @@ def normalize_path(path):
 
     if name != basedir and not name.startswith(basedir + os.path.sep):
         logging.warn("Outside base: %s", name)
-        raise AccessError(403, "forbidden")
+        raise AccessError(401, "forbidden")
     try:
 
         sr = os.stat(name)
     except FileNotFoundError:
         logging.warn("File not found: %s", name)
-        raise AccessError(403, "forbidden")
+        raise AccessError(401, "forbidden")
     except Exception:
         logging.error("Stat error on %s", name)
-        raise AccessError(403, "forbidden")
+        raise AccessError(401, "forbidden")
 
     if sr.st_uid != os.geteuid():
         logging.warn("Wrong owner found for %s", name)
@@ -551,19 +551,19 @@ def normalize_path(path):
         dirname, fname = os.path.split(path)
         return name, dirname, fname
 
-    raise AccessError(403, "forbidden")
+    raise AccessError(401, "forbidden")
 
 
 def has_access(user, dirname, action):
     perms = config.user_perms.get(user, None)
     if perms is None:
         logging.error("Unknown user: %s", user)
-        raise AccessError(403, "forbidden")
+        raise AccessError(401, "forbidden")
 
     dirs = perms.get(action, None)
     if dirs is None:
         logging.error("Unknown action: %s", action)
-        raise AccessError(403, "forbidden")
+        raise AccessError(401, "forbidden")
 
     while True:
         if dirname in config.all_dirs:
@@ -715,19 +715,19 @@ def handle(path):
         if has_access(user, dirname, Access.UPLOAD):
             resp = upload_file(user, dirname)
         else:
-            raise AccessError(403, "forbidden")
+            raise AccessError(401, "forbidden")
 
     elif fname and action == "delete":
         if has_access(user, dirname, Access.DELETE):
             resp = delete_file(user, dirname, fname)
         else:
-            raise AccessError(403, "forbidden")
+            raise AccessError(401, "forbidden")
 
     elif fname is None and action == "mkdir":
         if has_access(user, dirname, Access.MKDIR):
             resp = make_dir(user, dirname)
         else:
-            raise AccessError(403, "forbidden")
+            raise AccessError(401, "forbidden")
 
     elif fname and action is None:
         if has_access(user, dirname, Access.FETCH):
@@ -737,7 +737,7 @@ def handle(path):
                                              user)
             resp = streamfile(fullname)
         else:
-            raise AccessError(403, "forbidden")
+            raise AccessError(401, "forbidden")
 
     resp.set_cookie("cred", cred)
     return resp
@@ -908,8 +908,10 @@ def make_ftp_server():
         return ftp_server
     except NoOptionError:
         logging.warning("Not running FTP server, is 'ftp_port' configured?")
+        logging.debug("Error", exc_info=True)
     except Exception:
         logging.warning("Not running FTP server, is pyftpdlib available?")
+        logging.debug("Error", exc_info=True)
 
     return DummyFtpServer()
 
