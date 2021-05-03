@@ -1,26 +1,27 @@
 #!/usr/bin/python3
 
+from aiohttp import web
+from aiohttp.web_runner import AppRunner, TCPSite
 import argparse
+from asyncinotify import Inotify, Mask
+import asyncio
 import base64
+from cryptography.fernet import Fernet
 from enum import Enum
 from http import HTTPStatus
+import jinja2
 import json
 import logging
 from logging.config import dictConfig
 import mimetypes
 import os
-import re
+import ssl
 import stat
 import threading
 import types
 from functools import wraps
 
-import gevent
-from gevent.pywsgi import WSGIServer
-
 from django.utils import text
-from flask import Flask, request, Response, render_template_string, \
-    send_file, redirect, url_for
 
 try:
     from pyftpdlib.authorizers import AuthenticationFailed
@@ -42,7 +43,8 @@ class Access(Enum):
     MKDIR = "mkdir"
 
 
-logging.basicConfig()
+logging.basicConfig(level=logging.DEBUG)
+log = logging.getLogger
 
 UNAUTH = "anonymous"
 
@@ -113,20 +115,20 @@ TEMPLATE = """<!doctype html>
   </head>
   <div id="head">
     <div id="msgbox">
-      {% if status -%}
+      {% if statusmessage -%}
       <div id="status">
         <label>Status message: </label>
         <p>
-        {{ status }}
+        {{ statusmessage }}
       </div>
       {% else -%}
       <div id="privacy">
-        <a href="/privacy/{{dirname}}">privacy</a>
+        <a href="{{bp(user, dirname)}}privacy/{{dirname}}">privacy</a>
       </div>
       {% endif -%}
     </div>
     <div id="loginbox">
-      <form method="POST" action="/">
+      <form method="POST" action="/login" >
         <table>
           <tr>
             <td>
@@ -156,9 +158,8 @@ TEMPLATE = """<!doctype html>
   <div id="content">
   {% if allow_upload -%}
   <hr class="fullhr">
-  <form action="/{{dirname}}" method="post" enctype="multipart/form-data">
+  <form action="{{bp(user, dirname)}}{{dirname}}?action=upload" method="post" enctype="multipart/form-data">
     <input type="file" name="file" />
-    <input type="hidden" name="action" value="upload" />
     <button type="submit">upload</button>
   </form>
   {% endif -%}
@@ -170,17 +171,15 @@ TEMPLATE = """<!doctype html>
   </div>
   {% if allow_fetch -%}
   <div id="link">
-    <a href="{{prefix}}{{f["path"]}}">
+    <a href="{{bp(user, f["path"])}}{{f["path"]}}">
       {{f["name"]}}
     </a>
   </div>
-  <div id="full_link">{{prefix}}{{f["path"]}}</div>
   {% else -%}
   {{f["name"]}}
   {% endif -%}
   {% if allow_delete -%}
-  <form action="/{{f["path"]}}" method="post">
-    <input type="hidden" name="action" value="delete" />
+  <form action="{{bp(user,f["path"])}}{{f["path"]}}?action=delete" method="post">
     <button type="submit">delete</button>
   </form>
   {% endif -%}
@@ -191,15 +190,14 @@ TEMPLATE = """<!doctype html>
   {% if parentdir != None -%}
   <div id="row">
   <div id="link">
-    <a href="{{prefix}}{{parentdir}}">
+    <a href="{{bp(user,parentdir)}}{{parentdir}}">
       &lt;parent directory&gt;
     </a>
   </div>
   {% endif -%}
   {% if allow_mkdir -%}
   <div id="row">
-  <form action="/{{dirname}}" method="POST">
-    <input type="hidden" name="action" value="mkdir" />
+  <form action="{{bp(user,dirname)}}{{dirname}}?action=mkdir" method="POST">
     <input type="text" name="dirname" />
     <button type="submit">new directory</button>
   </form>
@@ -207,7 +205,7 @@ TEMPLATE = """<!doctype html>
   {% endif -%}
   {% for s in subdirs -%}
   <div id="row">
-  <a href="{{prefix}}{{s["path"]}}">
+  <a href="{{bp(user,s["path"])}}{{s["path"]}}">
     {{s["name"]}}
   </a>
   </form>
@@ -226,7 +224,28 @@ class AccessError(Exception):
         super().__init__(self, message, code)
 
 
-letsencrypt_data = dict()
+def redirect_on_exception(func):
+    @wraps(func)
+    async def __wrapper(*args, **kwargs):
+        try:
+            return await func(*args, **kwargs)
+        except web.HTTPFound:
+            raise
+        except AccessError as e:
+            code = e.args[2]
+            log(__name__).error("AccessError in function")
+            if code == 401:
+                return web.Response(text='Unauthorized',
+                                    status=401,
+                                    headers={'WWW-Authenticate': 'Basic realm="fus login"'}
+                                    )
+            else:
+                return web.Response(text=e.args[1], status=code)
+        except Exception as e:
+            log(__name__).error("Error in function: %s", e)
+            log(__name__).debug("Error in function", exc_info=True)
+            return web.HTTPFound("/")
+    return __wrapper
 
 
 def get_all_user(config, section, access):
@@ -240,7 +259,7 @@ def get_all_user(config, section, access):
     group_sections = ["group:" + s for s in groups]
     for gs in group_sections:
         if not config.has_section(gs):
-            logging.error("No section '%s'", gs)
+            log(__name__).error("No section '%s'", gs)
             continue
         result.update(set(config.getlist(gs, "user")))
     if config.has_option(section, u_access):
@@ -281,7 +300,7 @@ def compute_permissions(config):
                 all_user = get_all_user(config, section, access)
                 for user in all_user:
                     if user not in user_perms:
-                        logging.error("User '%s' unconfigured", user)
+                        log(__name__).error("User '%s' unconfigured", user)
                         continue
                     user_perms[user][access].append(dir_name)
     config.user_perms = user_perms
@@ -314,208 +333,380 @@ def load_config():
     return config
 
 
-def setup_logging():
+def setup_logging(config):
     log_config = json.loads(config.get("logging", "config"))
     dictConfig(log_config)
 
 
-def setup_app():
-    # create data dirs, if needed
-    basedir = config.get("global", "basedir")
-    for section in config.sections():
-        if section.startswith("dir:"):
-            dir_name = os.path.join(basedir, section[4:])
-            if not os.access(dir_name, os.R_OK | os.X_OK | os.W_OK):
-                os.makedirs(dir_name)
+class WebIF(object):
 
-    app = Flask(__name__)
-    app.config['DEBUG'] = config.getboolean("global", "debug")
-    return app
+    def __init__(self, loop, config):
+        self.loop = loop
+        self.config = config
+        self.fernet = Fernet(config.get("global", "key"))
+        # create data dirs, if needed
+        basedir = config.get("global", "basedir")
+        for section in config.sections():
+            if section.startswith("dir:"):
+                dir_name = os.path.join(basedir, section[4:])
+                os.makedirs(dir_name, exist_ok=True)
 
+        self.app = web.Application()
+        router = self.app.router
+        router.add_route('GET', "/favicon.ico", self.favicon)
+        router.add_route('POST', "/login", self.login)
+        router.add_route('GET', "/.well-known/acme-challenge/{token}",
+                         self.serve_letsencrypt)
+        router.add_route('GET', "/.well-known/acme-challenge/upload/{token}/{thumb}",
+                         self.upload_letsencrypt)
+        router.add_route('GET', "/privacy", self.privacy)
+        router.add_route('GET', "/{token}/auth/privacy", self.privacy)
+        router.add_route('GET', "/{token}/auth/privacy/{path:.*}", self.privacy)
+        router.add_route('GET', "/{token}/auth/{path:.*}", self.handle)
+        router.add_route('POST', "/{token}/auth/{path:.*}", self.handle)
+        router.add_route('GET', "/{path:.*}", self.handle, name='handle-get')
+        router.add_route('POST', "/{path:.*}", self.handle, name='handle-post')
 
-def run_server(app):
-    server = []
-    if config.has_option("global", "https_port"):
-        https_server = WSGIServer((config.get("global", "host"),
-                                   config.getint("global", "https_port")),
-                                  app,
-                                  keyfile=config.get("global", "keyfile"),
-                                  certfile=config.get("global", "certfile"))
-        https_server.start()
-        server.append(https_server)
+        self.runner = AppRunner(self.app)
+        self.loop.run_until_complete(self.runner.setup())
+        self.cert_watcher = None
 
-    if config.has_option("global", "http_port"):
-        http_server = WSGIServer((config.get("global", "host"),
-                                  config.getint("global", "http_port")),
-                                 app)
-        http_server.start()
-        server.append(http_server)
+        loop.run_until_complete(self.init_site("http_site"))
+        loop.run_until_complete(self.init_site("https_site"))
 
-    return server
+        self.letsencrypt_data = dict()
 
+    async def init_site(self, site_name):
+        if getattr(self, site_name, None):
+            await getattr(self, site_name).stop()
 
-config = load_config()
+        if site_name == "https_site":
+            if not self.config.has_option("global", "https_port"):
+                return
+            port = self.config.getint("global", "https_port")
+            ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLSv1_2)
+            ssl_context.load_cert_chain(certfile=config.get("global", "certfile"),
+                                        keyfile=config.get("global", "keyfile"))
+            if self.cert_watcher is None:
+                self.cert_watcher = loop.create_task(self.watch_cert())
+        else:
+            if not self.config.has_option("global", "http_port"):
+                return
+            port = self.config.getint("global", "http_port")
+            ssl_context = None
 
-setup_logging()
+        log(__name__).info("Starting fresh site %s", site_name)
 
-app = setup_app()
+        site = TCPSite(self.runner,
+                       config.get("global", "host"),
+                       port,
+                       ssl_context=ssl_context,
+                       reuse_address=True,
+                       reuse_port=True)
 
+        setattr(self, site_name, site)
+        await site.start()
 
-@app.after_request
-def after_request(response):
-    response.headers.remove('Accept-Ranges')
-    response.headers.add('Accept-Ranges', 'bytes')
-    return response
+    def close(self):
+        self.loop.run_until_complete(self.runner.cleanup())
+        if self.cert_watcher:
+            self.cert_watcher.cancel()
 
+    async def watch_cert(self):
+        with Inotify() as inotify:
+            dirname, basename = os.path.split(self.config.get("global", "certfile"))
+            inotify.add_watch(dirname, Mask.DELETE | Mask.CLOSE_WRITE | Mask.MOVE)
+            async for event in inotify:
+                if os.path.basename(event.path) == basename:
+                    log(__name__).info("Event on cert file")
+                    try:
+                        await self.init_site("https_site")
+                    except Exception:
+                        log(__name__).debug("Error updating ssl context", exc_info=True)
 
-def get_user_from_request(path):
-    try:
-        # form keys first
-        user = request.values.get("user", None)
-        password = request.values.get("password", None)
+    def peername(self, request):
+        peername = request.transport.get_extra_info('peername')
+        return peername if peername else ("???", 0)
 
-        if user is not None and password is not None:
-            return user, password
+    def redirect(self, request, user, path, msg):
+        router = request.app.router['handle-get']
+        if path is None:
+            path = ""
+        path = (self.build_prefix(user, path) + path).lstrip("/")
+        if msg is None:
+            raise web.HTTPFound(router.url_for(path=path))
+        else:
+            raise web.HTTPFound(router.url_for(path=path).with_query({"msg": msg}))
 
-        # basic-auth second
-        auth = request.authorization
-        if auth:
-            return auth["username"], auth["password"]
+    async def favicon(self, request):
+        favicon = self.config.get("global", "favicon")
+        return web.Response(body=base64.b64decode(favicon), content_type="image/vnd.microsoft.icon")
 
-        # credentials from cred cookie
-        cred = request.cookies.get("cred", None)
-        if cred:
-            return base64.b64decode(cred).decode("utf8").split(":", 1)
+    async def serve_letsencrypt(self, request):
+        token = request.match_info["token"]
+        log(__name__).info("%s - - cert verification request %s", self.peername(request), token)
+        if token in self.letsencrypt_data:
+            return web.Response(text=self.letsencrypt_data[token], status=200)
+        else:
+            return web.Response(text="permission denied", status=403, reason="permission denied")
 
-    except Exception:
-        logging.info("Error", exc_info=True)
-    return UNAUTH, None
+    async def upload_letsencrypt(self, request):
+        token = request.match_info["token"]
+        thumb = request.match_info["thumb"]
+        log(__name__).info("%s - - cert verification file %s.%s",
+                           self.peername(request), token, thumb)
+        self.letsencrypt_data[token] = "%s.%s" % (token, thumb)
+        return web.Response(text="ok", status=200)
 
+    async def get_user(self, request):
+        """Get username either from token, basic auth header, or form keys"""
 
-def get_user(path=None):
-    """Get username either from cookie, basic auth header, or form keys"""
+        user, password = await self.get_user_from_request(request)
 
-    user, password = get_user_from_request(path)
+        if self.config.user_perms.get(user, dict()).get("creds", None) == password:
+            log(__name__).info("%s - - User %s active", self.peername(request), user)
+            cred = ("%s:%s" % (user, password)).encode("ascii")
+            cred = base64.b64encode(cred).decode("ascii")
+            return user, password, cred
 
-    if config.user_perms.get(user, dict()).get("creds", None) == password:
-        logging.info("%s - - User %s active", request.remote_addr, user)
-        cred = ("%s:%s" % (user, password)).encode("ascii")
-        cred = base64.b64encode(cred).decode("ascii")
-        return user, password, cred
+        log(__name__).warning("%s - - Anonymous active %s:%s",
+                              self.peername(request), user, password)
+        return UNAUTH, None, ""
 
-    logging.warning("%s - - Anonymous active %s:%s",
-                    request.remote_addr, user, password)
-    return UNAUTH, None, ""
-
-
-def redirect_on_exception(func):
-    @wraps(func)
-    def __wrapper(*args, **kwargs):
+    async def get_user_from_request(self, request):
         try:
-            return func(*args, **kwargs)
-        except AccessError as e:
-            code = e.args[2]
-            logging.getLogger(__name__).error("AccessError in function")
-            print(code)
-            if code == 401:
-                return Response('Unauthorized',
-                                code,
-                                {'WWW-Authenticate': 'Basic realm="fus login"'}
-                                )
+            if request.content_type == "application/x-www-form-urlencoded":
+                formdata = await request.post()
+                request.formdata = formdata
             else:
-                return Response(e.args[1], code, mimetype="text/plain")
+                request.formdata = dict()
+
+            # form keys first
+            user = request.formdata.get("user", None)
+            password = request.formdata.get("password", None)
+            if user is not None and password is not None:
+                return user, password
+
+            if "token" in request.match_info:
+                token = request.match_info["token"].encode("ascii")
+                user, path = self.fernet.decrypt(token).decode("utf-8").split(":", 1)
+                if path == request.match_info["path"]:
+                    return user, self.config.user_perms.get(user, dict()).get("creds", None)
+
+            # basic-auth second
+            auth = request.headers.get("authorization", "")
+            if auth.lower().startswith("basic "):
+                return base64.b64decode(auth[6:]).decode("utf8").split(":", 1)
+
         except Exception:
-            logging.getLogger(__name__).error("Error in function",
-                                              exc_info=True)
-            return redirect("/", code=302)
-    return __wrapper
+            log(__name__).info("Error", exc_info=True)
+        return UNAUTH, None
 
+    def build_prefix(self, user, path):
+        if user == UNAUTH:
+            return "/"
+        else:
+            token = self.fernet.encrypt(("%s:%s" % (user, path)).encode("utf-8"))
+            return "/%s/auth/" % token.decode("ascii")
 
-@app.route("/favicon.ico", methods=["GET"])
-def favicon():
-    favicon = config.get("global", "favicon")
-    return Response(base64.b64decode(favicon), mimetype="image/gif")
+    @redirect_on_exception
+    async def login(self, request):
+        user, password, cred = await self.get_user(request)
+        if user == UNAUTH:
+            msg = "signed out"
+        else:
+            msg = "%s signed in" % user
+        self.redirect(request, user, "", msg)
 
+    @redirect_on_exception
+    async def handle(self, request):
+        path = request.match_info.get("path", "")
+        fullname, dirname, fname = self.normalize_path(path)
 
-@app.route("/.well-known/acme-challenge/<token>", methods=["GET"])
-def serve_letsencrypt(token):
-    logging.getLogger(__name__).info("%s - - cert verification request %s",
-                                     request.remote_addr, token)
-    if token in letsencrypt_data:
-        return Response(letsencrypt_data[token], 200, mimetype="text/plain")
-    else:
-        return Response("permission denied", 403, mimetype="text/plain")
+        action = request.query.get("action", None)
+        user, password, cred = await self.get_user(request)
 
+        if fname is None and action in [None, "list"]:
+            if not (has_access(user, dirname, Access.LIST)
+                    or has_access(user, dirname, Access.UPLOAD)
+                    or has_access(user, dirname, Access.MKDIR)):
+                raise AccessError(HTTPStatus.UNAUTHORIZED, "forbidden")
 
-@app.route("/.well-known/acme-challenge/upload/<token>/<thumb>",
-           methods=["GET"])
-def upload_letsencrypt(token, thumb):
-    logging.getLogger(__name__).info("%s - - cer verification file %s.%s",
-                                     request.remote_addr, token, thumb)
-    global letsencrypt_data
-    letsencrypt_data[token] = "%s.%s" % (token, thumb)
-    return Response("ok", 200, mimetype="text/plain")
+            subdirs, files = list_dir(fullname)
+            filter_file_list(user, dirname, subdirs, files)
+            msg = request.query.get("msg", None)
+            template = jinja2.Template(TEMPLATE)
+            resp = web.Response(
+                status=200,
+                content_type='text/html',
+                text=template.render(
+                    dirname=dirname,
+                    parentdir=None if not dirname else os.path.split(dirname)[0],
+                    files=[{"name": f,
+                            "path": os.path.join(dirname, f)}
+                           for f in files],
+                    subdirs=[{"name": s,
+                              "path": os.path.join(dirname, s)}
+                             for s in subdirs],
+                    statusmessage=msg,
+                    prefix="/",
+                    allow_upload=has_access(user, dirname, Access.UPLOAD),
+                    allow_delete=has_access(user, dirname, Access.DELETE),
+                    allow_fetch=has_access(user, dirname, Access.FETCH),
+                    allow_mkdir=has_access(user, dirname, Access.MKDIR),
+                    debug=config.getboolean("global", "debug"),
+                    user=user,
+                    bp=self.build_prefix)
+                )
 
+        elif fname is None and action == "upload":
+            if has_access(user, dirname, Access.UPLOAD):
+                resp = await self.upload_file(request, user, dirname)
+            else:
+                raise AccessError(401, "forbidden")
 
-def upload_file(user, directory):
-    file = request.files['file']
-    fname = text.get_valid_filename(os.path.basename(file.filename))
-    name = os.path.join(directory, fname)
-    fullname = os.path.join(config.get("global", "basedir"), name)
-    if not fname:
-        return redirect(url_for("handle", path=directory,
-                                status="invalid filename"),
-                        code=302)
-    if os.access(fullname, os.R_OK):
-        return Response("duplicate", 403)
-    file.save(fullname)
-    logging.info("%s - - File %s uploaded by %s",
-                 request.remote_addr, name, user)
-    size = os.lstat(fullname).st_size
-    return redirect(url_for("handle", path=directory,
-                            status="%d bytes saved as %s" % (size, fname)),
-                    code=302)
+        elif fname and action == "delete":
+            if has_access(user, dirname, Access.DELETE):
+                resp = await self.delete_file(request, user, dirname, fname)
+            else:
+                raise AccessError(401, "forbidden")
 
+        elif fname is None and action == "mkdir":
+            if has_access(user, dirname, Access.MKDIR):
+                resp = await self.make_dir(request, user, dirname)
+            else:
+                raise AccessError(401, "forbidden")
 
-def delete_file(user, dirname, filename):
-    name = os.path.join(dirname, filename)
-    fullname = os.path.join(config.get("global", "basedir"), name)
-    try:
+        elif fname and action is None:
+            if has_access(user, dirname, Access.FETCH):
+                log(__name__).info("%s - - Download %s by %s",
+                                   self.peername(request),
+                                   fullname,
+                                   user)
+                resp = await self.streamfile(request, fullname)
+            else:
+                raise AccessError(401, "forbidden")
+
+        resp.headers["Accept-Ranges"] = "bytes"
+        return resp
+
+    async def make_dir(self, request, user, dirname):
+        filename = text.get_valid_filename(request.formdata["dirname"])
+        name = os.path.join(dirname, filename)
+        fullname = os.path.join(config.get("global", "basedir"), name)
+        os.makedirs(fullname, exist_ok=True)
+        log(__name__).info("%s - - Directory %s created by %s",
+                           self.peername(request),
+                           fullname,
+                           user)
+        self.redirect(request, user, dirname, "Directory %s created" % name)
+
+    async def upload_file(self, request, user, directory):
+        if request.method != "POST" or request.content_type != "multipart/form-data":
+            AccessError(400, "invalid")
+
+        reader = await request.multipart()
+        field = await reader.next()
+        if field.name != "file":
+            AccessError(400, "invalid")
+        fname = text.get_valid_filename(os.path.basename(field.filename))
+        name = os.path.join(directory, fname)
+        fullname = os.path.join(config.get("global", "basedir"), name)
+        if not fname:
+            self.redirect(request, user, directory, "invalid filename")
+        if os.access(fullname, os.R_OK):
+            raise AccessError(403, "duplicate")
+        with open(fullname, 'wb') as f:
+            while True:
+                chunk = await field.read_chunk()  # 8192 bytes by default.
+                if not chunk:
+                    break
+                f.write(chunk)
+        log(__name__).info("%s - - File %s uploaded by %s",
+                           self.peername(request), name, user)
+        size = os.lstat(fullname).st_size
+        self.redirect(request, user, directory, "%d bytes saved as %s" % (size, fname))
+
+    async def delete_file(self, request, user, dirname, filename):
+        name = os.path.join(dirname, filename)
+        fullname = os.path.join(config.get("global", "basedir"), name)
         os.remove(fullname)
-        logging.getLogger(__name__).info("%s - - File %s deleted by %s",
-                                         request.remote_addr,
-                                         fullname,
-                                         user)
-        return redirect(url_for("handle", path=dirname,
-                                status="File %s deleted" % name),
-                        code=302)
-    except Exception:
-        logging.error("%s - - Failed to delete %s by %s",
-                      request.remote_addr,
-                      fullname,
-                      user)
-    return Response("permission denied", 401, {'WWW-Authenticate':'Basic realm="fus login"'})
+        log(__name__).info("%s - - File %s deleted by %s",
+                           self.peername(request),
+                           fullname,
+                           user)
+        self.redirect(request, user, dirname, "File %s deleted" % name)
+        raise AccessError(401, "permission denied")
 
+    async def streamfile(self, request, fullname):
+        rng = request.http_range
 
-def make_dir(user, dirname):
-    filename = text.get_valid_filename(request.values["dirname"])
-    name = os.path.join(dirname, filename)
-    fullname = os.path.join(config.get("global", "basedir"), name)
-    try:
-        os.makedirs(fullname)
-        logging.getLogger(__name__).info("%s - - Directory %s created by %s",
-                                         request.remote_addr,
-                                         fullname,
-                                         user)
-        return redirect(url_for("handle", path=dirname,
-                                status="Directory %s created" % name),
-                        code=302)
-    except Exception:
-        logging.error("%s - - Failed to create directory %s by %s",
-                      request.remote_addr,
-                      fullname,
-                      user)
-    return Response("permission denied", 401, {'WWW-Authenticate':'Basic realm="fus login"'})
+        resp = web.StreamResponse(status=200 if rng.start is None else 206,
+                                  reason="OK",
+                                  headers={'Content-Type': get_mime_type(fullname),
+                                           'Accept-Ranges': 'bytes'})
+
+        size = length = os.path.getsize(fullname)
+
+        try:
+
+            with open(fullname, 'rb') as f:
+                if rng.start is not None:
+                    length -= rng.start
+                    if rng.stop is not None:
+                        length = min(rng.stop - rng.start + 1, length)
+                    cr = "bytes {0}-{1}/{2}".format(rng.start, rng.start + length - 1, size)
+                    resp.headers["Content-Range"] = cr
+                    f.seek(rng.start)
+                await resp.prepare(request)
+                while length > 0:
+                    buf = f.read(min(8192, length))
+                    if not buf:
+                        break
+                    length -= len(buf)
+                    await resp.write(buf)
+
+                await resp.write_eof()
+        except ConnectionResetError:
+            # client went away
+            pass
+
+        return resp
+
+    async def privacy(self, request):
+        path = request.match_info.get("path", "")
+        print("Path=", path)
+        user, password, cred = await self.get_user(request)
+        self.redirect(request, user, path, self.config.get("global", "gdprmsg"))
+
+    def normalize_path(self, path):
+        basedir = self.config.get("global", "basedir")
+        name = os.path.abspath(os.path.join(basedir, path))
+        path = name[len(basedir):].strip(os.path.sep)
+
+        if name != basedir and not name.startswith(basedir + os.path.sep):
+            log(__name__).warning("Outside base: %s", name)
+            raise AccessError(403, "forbidden")
+        try:
+            sr = os.stat(name)
+        except FileNotFoundError:
+            log(__name__).warning("File not found: %s", name)
+            raise AccessError(401, "forbidden")
+        except Exception:
+            log(__name__).error("Stat error on %s", name)
+            raise AccessError(401, "forbidden")
+
+        if sr.st_uid != os.geteuid():
+            log(__name__).warning("Wrong owner found for %s", name)
+
+        if stat.S_ISDIR(sr.st_mode):
+            return name, path, None
+
+        if stat.S_ISREG(sr.st_mode):
+            dirname, fname = os.path.split(path)
+            return name, dirname, fname
+
+        raise AccessError(401, "forbidden")
 
 
 def get_mime_type(f):
@@ -523,46 +714,15 @@ def get_mime_type(f):
     return type if type is not None else "application/octet-stream"
 
 
-def normalize_path(path):
-    basedir = config.get("global", "basedir")
-    name = os.path.abspath(os.path.join(basedir, path))
-    path = name[len(basedir):].strip(os.path.sep)
-
-    if name != basedir and not name.startswith(basedir + os.path.sep):
-        logging.warn("Outside base: %s", name)
-        raise AccessError(401, "forbidden")
-    try:
-
-        sr = os.stat(name)
-    except FileNotFoundError:
-        logging.warn("File not found: %s", name)
-        raise AccessError(401, "forbidden")
-    except Exception:
-        logging.error("Stat error on %s", name)
-        raise AccessError(401, "forbidden")
-
-    if sr.st_uid != os.geteuid():
-        logging.warn("Wrong owner found for %s", name)
-
-    if stat.S_ISDIR(sr.st_mode):
-        return name, path, None
-
-    if stat.S_ISREG(sr.st_mode):
-        dirname, fname = os.path.split(path)
-        return name, dirname, fname
-
-    raise AccessError(401, "forbidden")
-
-
 def has_access(user, dirname, action):
     perms = config.user_perms.get(user, None)
     if perms is None:
-        logging.error("Unknown user: %s", user)
+        log(__name__).error("Unknown user: %s", user)
         raise AccessError(401, "forbidden")
 
     dirs = perms.get(action, None)
     if dirs is None:
-        logging.error("Unknown action: %s", action)
+        log(__name__).error("Unknown action: %s", action)
         raise AccessError(401, "forbidden")
 
     while True:
@@ -589,7 +749,7 @@ def list_dir(dirname):
             if stat.S_ISREG(sr.st_mode):
                 files.append(n)
         except Exception:
-            logging.exception("Error in list_dir(%s)", dirname)
+            log(__name__).exception("Error in list_dir(%s)", dirname)
     return dirs, files
 
 
@@ -607,141 +767,6 @@ def filter_file_list(user, dirname, subdirs, files):
             subdirs.remove(d)
 
 
-def mk_prefix():
-    return "http%s://%s/" % ("s" if request.is_secure else "", request.host)
-
-
-@app.route("/privacy", defaults={'path': ''}, methods=["GET", "POST"])
-@app.route("/privacy/", defaults={'path': ''}, methods=["GET", "POST"])
-@app.route("/privacy/<path:path>", methods=["GET", "POST"])
-def privacy(path):
-    user, password, cred = get_user()
-    return redirect(url_for("handle", path=path,
-                            status=config.get("global", "gdprmsg")),
-                    code=302)
-
-
-def streamfile(fullname):
-
-    def send_chunks_iter(filename, start, length):
-        with open(filename, 'rb') as f:
-            offset = 0
-            while offset < length:
-                f.seek(start + offset)
-                chunk = config.getint("global", "chunksize")
-                if offset + chunk > length:
-                    chunk = length - offset
-                offset += chunk
-                logging.getLogger(__name__).debug("Sending %d-%d of %s",
-                                                  start+offset,
-                                                  start+offset+length,
-                                                  filename)
-                yield f.read(chunk)
-
-    range_header = request.headers.get('Range', None)
-    if not range_header:
-        resp = send_file(fullname, mimetype=get_mime_type(fullname))
-        resp.make_conditional(request)
-        return resp
-
-    size = os.path.getsize(fullname)
-    byte1, byte2 = 0, None
-
-    m = re.search(r'(\d+)-(\d*)', range_header)
-    g = m.groups()
-
-    if g[0]:
-        byte1 = int(g[0])
-    if g[1]:
-        byte2 = int(g[1])
-
-    length = size - byte1
-    if byte2 is not None:
-        length = min(byte2 - byte1 + 1, length)
-
-    resp = Response(send_chunks_iter(fullname, byte1, length),
-                    206,
-                    mimetype=get_mime_type(fullname),
-                    direct_passthrough=True)
-    resp.headers.add('Content-Range',
-                     'bytes {0}-{1}/{2}'.format(byte1,
-                                                byte1 + length - 1,
-                                                size)
-                     )
-    return resp
-
-
-@app.route('/', defaults={'path': ''}, methods=["GET", "POST"])
-@app.route('/<path:path>', methods=["GET", "POST"])
-@redirect_on_exception
-def handle(path):
-    user, password, cred = get_user(path)
-
-    fullname, dirname, fname = normalize_path(path)
-
-    action = request.values.get("action", None)
-
-    if fname is None and action in [None, "list"]:
-        if not (has_access(user, dirname, Access.LIST)
-                or has_access(user, dirname, Access.UPLOAD)
-                or has_access(user, dirname, Access.MKDIR)):
-            raise AccessError(HTTPStatus.UNAUTHORIZED, "forbidden")
-
-        subdirs, files = list_dir(fullname)
-        filter_file_list(user, dirname, subdirs, files)
-        status = request.values.get("status", None)
-        resp = Response(
-            render_template_string(
-                TEMPLATE,
-                dirname=dirname,
-                parentdir=None if not dirname else os.path.split(dirname)[0],
-                prefix=mk_prefix(),
-                files=[{"name": f,
-                        "path": os.path.join(dirname, f)}
-                       for f in files],
-                subdirs=[{"name": s,
-                          "path": os.path.join(dirname, s)}
-                         for s in subdirs],
-                status=status,
-                allow_upload=has_access(user, dirname, Access.UPLOAD),
-                allow_delete=has_access(user, dirname, Access.DELETE),
-                allow_fetch=has_access(user, dirname, Access.FETCH),
-                allow_mkdir=has_access(user, dirname, Access.MKDIR),
-                debug=config.getboolean("global", "debug"),
-                user=user)
-            )
-
-    elif fname is None and action == "upload":
-        if has_access(user, dirname, Access.UPLOAD):
-            resp = upload_file(user, dirname)
-        else:
-            raise AccessError(401, "forbidden")
-
-    elif fname and action == "delete":
-        if has_access(user, dirname, Access.DELETE):
-            resp = delete_file(user, dirname, fname)
-        else:
-            raise AccessError(401, "forbidden")
-
-    elif fname is None and action == "mkdir":
-        if has_access(user, dirname, Access.MKDIR):
-            resp = make_dir(user, dirname)
-        else:
-            raise AccessError(401, "forbidden")
-
-    elif fname and action is None:
-        if has_access(user, dirname, Access.FETCH):
-            logging.getLogger(__name__).info("%s - - Download %s by %s",
-                                             request.remote_addr,
-                                             fullname,
-                                             user)
-            resp = streamfile(fullname)
-        else:
-            raise AccessError(401, "forbidden")
-
-    resp.set_cookie("cred", cred)
-    return resp
-
 #
 # FTP adapter
 #
@@ -752,9 +777,9 @@ class MyAuthorizer(object):
     def validate_authentication(self, username, password, handler):
         creds = config.user_perms.get(username, dict()).get("creds", None)
         if creds != password:
-            logging.warning("Invalid credentials for user %s", username)
+            log(__name__).warning("Invalid credentials for user %s", username)
             raise AuthenticationFailed()
-        logging.info("User %s logged in", username)
+        log(__name__).info("User %s logged in", username)
 
     def get_home_dir(self, username):
         return config.get("global", "basedir")
@@ -783,16 +808,16 @@ class MyAuthorizer(object):
         path = path.lstrip(os.path.sep)
 
         if perm in "elmrwd":
-            logging.debug("User %s granted %s for '%s'",
-                          username,
-                          perm,
-                          path)
+            log(__name__).debug("User %s granted %s for '%s'",
+                                username,
+                                perm,
+                                path)
             return True
         else:
-            logging.warn("Perm %s invalid for user %s at '%s'",
-                         perm,
-                         username,
-                         path)
+            log(__name__).warning("Perm %s invalid for user %s at '%s'",
+                                  perm,
+                                  username,
+                                  path)
         return False
 
 
@@ -812,15 +837,15 @@ class MyFilesystem(AbstractedFS):
         for access in access_list:
             try:
                 if has_access(user, path, access):
-                    logging.info("%s granted to %s for '%s'",
-                                 access, user, path)
+                    log(__name__).info("%s granted to %s for '%s'",
+                                       access, user, path)
                     return True
-                logging.debug("%s not allowed for %s at '%s'",
-                              access, user, path)
+                log(__name__).debug("%s not allowed for %s at '%s'",
+                                    access, user, path)
             except AccessError:
                 pass
-        logging.warning("%s not allowed for %s at '%s'",
-                        access_list, user, path)
+        log(__name__).warning("%s not allowed for %s at '%s'",
+                              access_list, user, path)
         return False
 
     def get_user_by_uid(self, uid):
@@ -882,7 +907,7 @@ class MyFilesystem(AbstractedFS):
         raise FilesystemError("invalid path")
 
 
-def make_ftp_server():
+def make_ftp_server(config):
 
     class DummyFtpServer:
         """Just a mock to make the FTP code happy when
@@ -907,28 +932,36 @@ def make_ftp_server():
 
         return ftp_server
     except NoOptionError:
-        logging.warning("Not running FTP server, is 'ftp_port' configured?")
-        logging.debug("Error", exc_info=True)
+        log(__name__).warning("Not running FTP server, is 'ftp_port' configured?")
+        log(__name__).debug("Error", exc_info=True)
     except Exception:
-        logging.warning("Not running FTP server, is pyftpdlib available?")
-        logging.debug("Error", exc_info=True)
+        log(__name__).warning("Not running FTP server, is pyftpdlib available?")
+        log(__name__).debug("Error", exc_info=True)
 
     return DummyFtpServer()
 
 
-ftp_server = make_ftp_server()
+config = load_config()
+print(config.get("global", "host"))
+setup_logging(config)
+
+ftp_server = make_ftp_server(config)
 
 ftp_thread = threading.Thread(target=ftp_server.serve_forever, args=(1,))
 ftp_thread.start()
 
-http_server = run_server(app)
-while True:
-    try:
-        gevent.sleep(60)
-    except KeyboardInterrupt:
-        break
+loop = asyncio.get_event_loop()
 
-logging.getLogger(__name__).info("HTTP Server stopped")
+web_if = WebIF(loop, config)
+
+try:
+    log(__name__).info("Server running, CTRL-C to exit")
+    loop.run_forever()
+except KeyboardInterrupt:
+    pass
+web_if.close()
+
+log(__name__).info("HTTP Server stopped")
 ftp_server.close_all()
 ftp_thread.join()
-logging.getLogger(__name__).info("FTP Server stopped")
+log(__name__).info("FTP Server stopped")
