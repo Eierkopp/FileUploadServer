@@ -342,7 +342,13 @@ class WebIF(object):
     def __init__(self, loop, config):
         self.loop = loop
         self.config = config
-        self.fernet = Fernet(config.get("global", "key"))
+        if config.has_option("global", "key"):
+            self.fernet = Fernet(config.get("global", "key"))
+        else:
+            log(__name__).error("You need to add a key to section [global], e.g.\n"
+                                "key: %s", Fernet.generate_key().decode("ascii"))
+            raise NoOptionError("key", "global")
+
         # create data dirs, if needed
         basedir = config.get("global", "basedir")
         for section in config.sections():
@@ -948,7 +954,6 @@ def make_ftp_server(config):
 
 
 config = load_config()
-print(config.get("global", "host"))
 setup_logging(config)
 
 ftp_server = make_ftp_server(config)
@@ -958,14 +963,16 @@ ftp_thread.start()
 
 loop = asyncio.get_event_loop()
 
-web_if = WebIF(loop, config)
-
 try:
-    log(__name__).info("Server running, CTRL-C to exit")
-    loop.run_forever()
-except KeyboardInterrupt:
-    pass
-web_if.close()
+    web_if = WebIF(loop, config)
+    try:
+        log(__name__).info("Server running, CTRL-C to exit")
+        loop.run_forever()
+    except KeyboardInterrupt:
+        pass
+    web_if.close()
+except NoOptionError as e:
+    log(__name__).error("Failed to start web interface: %s", e)
 
 log(__name__).info("HTTP Server stopped")
 ftp_server.close_all()
