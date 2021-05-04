@@ -1,6 +1,12 @@
+fus (2.0.1) unstable; urgency=low
+
+  * remove asnyinotify dependency
+
+ -- Depperter Depp <depp@eierkopp.ddnss.org>  Tue, 4 May 2021 14:01:00 +0200
+
 fus (2.0.0) unstable; urgency=medium
 
-	* switch from flask to aiohttp
+  * switch from flask to aiohttp
 
  -- Depperter Depp <depp@eierkopp.ddnss.org>  Tue, 13 Apr 2021 19:12:00 +0200
 

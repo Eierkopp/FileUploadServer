@@ -6,5 +6,3 @@ getent passwd fus >/dev/null || useradd -U -m fus
 chown -R fus:fus /var/log/fus
 
 usermod -G ssl-cert fus
-
-systemctl daemon-reload

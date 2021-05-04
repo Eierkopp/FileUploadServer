@@ -3,7 +3,6 @@
 from aiohttp import web
 from aiohttp.web_runner import AppRunner, TCPSite
 import argparse
-from asyncinotify import Inotify, Mask
 import asyncio
 import base64
 from cryptography.fernet import Fernet
@@ -395,7 +394,7 @@ class WebIF(object):
             port = self.config.getint("global", "http_port")
             ssl_context = None
 
-        log(__name__).info("Starting fresh site %s", site_name)
+        log(__name__).info("Starting fresh site %s on port %d", site_name, port)
 
         site = TCPSite(self.runner,
                        config.get("global", "host"),
@@ -413,16 +412,23 @@ class WebIF(object):
             self.cert_watcher.cancel()
 
     async def watch_cert(self):
-        with Inotify() as inotify:
-            dirname, basename = os.path.split(self.config.get("global", "certfile"))
-            inotify.add_watch(dirname, Mask.DELETE | Mask.CLOSE_WRITE | Mask.MOVE)
-            async for event in inotify:
-                if os.path.basename(event.path) == basename:
-                    log(__name__).info("Event on cert file")
-                    try:
-                        await self.init_site("https_site")
-                    except Exception:
-                        log(__name__).debug("Error updating ssl context", exc_info=True)
+
+        def get_mtime(fname, old_mtime):
+            try:
+                return os.stat(fname).st_mtime
+            except OSError:
+                log(__name__).debug("Error in stat", exc_info=True)
+                return old_mtime
+
+        fname = self.config.get("global", "certfile")
+        ts = get_mtime(fname, None)
+        while True:
+            await asyncio.sleep(5)
+            new_ts = get_mtime(fname, ts)
+            if new_ts != ts:
+                ts = new_ts
+                await self.init_site("https_site")
+                log(__name__).debug("Updated ssl context")
 
     def peername(self, request):
         peername = request.transport.get_extra_info('peername')
