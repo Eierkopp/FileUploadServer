@@ -703,7 +703,7 @@ class WebIF(object):
             sr = os.stat(name)
         except FileNotFoundError:
             log(__name__).warning("File not found: %s", name)
-            raise AccessError(401, "forbidden")
+            raise AccessError(404, "not found")
         except Exception:
             log(__name__).error("Stat error on %s", name)
             raise AccessError(401, "forbidden")
