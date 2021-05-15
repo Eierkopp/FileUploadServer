@@ -372,7 +372,8 @@ class WebIF(object):
         router.add_route('GET', "/{path:.*}", self.handle, name='handle-get')
         router.add_route('POST', "/{path:.*}", self.handle, name='handle-post')
 
-        self.runner = AppRunner(self.app)
+        self.runner = AppRunner(self.app,
+                                access_log_format=config.get("logging", "access_log_format"))
         self.loop.run_until_complete(self.runner.setup())
         self.cert_watcher = None
 
