@@ -364,8 +364,7 @@ class WebIF(object):
                          self.serve_letsencrypt)
         router.add_route('GET', "/.well-known/acme-challenge/upload/{token}/{thumb}",
                          self.upload_letsencrypt)
-        router.add_route('GET', "/privacy", self.privacy)
-        router.add_route('GET', "/{token}/auth/privacy", self.privacy)
+        router.add_route('GET', "/privacy/", self.privacy)
         router.add_route('GET', "/{token}/auth/privacy/{path:.*}", self.privacy)
         router.add_route('GET', "/{token}/auth/{path:.*}", self.handle)
         router.add_route('POST', "/{token}/auth/{path:.*}", self.handle)

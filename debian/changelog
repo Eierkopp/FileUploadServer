@@ -1,3 +1,9 @@
+fus (2.0.2) unstable; urgency=low
+
+  * fix privacy url
+
+ -- Depperter Depp <depp@eierkopp.ddnss.org>  Mon, 7 Jun 2021 05:03:10 +0200
+
 fus (2.0.1) unstable; urgency=low
 
   * remove asnyinotify dependency
