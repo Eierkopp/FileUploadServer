@@ -1,3 +1,9 @@
+fus (2.0.3) unstable; urgency=low
+
+  * apparmor support
+
+ -- Depperter Depp <depp@eierkopp.ddnss.org>  Wed, 22 Dec 2021 04:31:10 +0200
+
 fus (2.0.2) unstable; urgency=low
 
   * fix privacy url

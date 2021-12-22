@@ -423,7 +423,7 @@ class WebIF(object):
             try:
                 return os.stat(fname).st_mtime
             except OSError:
-                log(__name__).debug("Error in stat", exc_info=True)
+                log(__name__).warning("Error in stat", exc_info=True)
                 return old_mtime
 
         fname = self.config.get("global", "certfile")
@@ -434,7 +434,7 @@ class WebIF(object):
             if new_ts != ts:
                 ts = new_ts
                 await self.init_site("https_site")
-                log(__name__).debug("Updated ssl context")
+                log(__name__).info("Updated ssl context")
 
     def peername(self, request):
         peername = request.transport.get_extra_info('peername')
