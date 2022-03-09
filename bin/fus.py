@@ -47,12 +47,12 @@ log = logging.getLogger
 
 UNAUTH = "anonymous"
 
-TEMPLATE = """<!doctype html>
+TEMPLATE = """<!DOCTYPE html>
 <html lang="de">
-  <head>
-    <meta charset="utf-8">
-    <title>File Upload Server for {{user}}</title>
-    <style>
+<head>
+  <meta charset="utf-8">
+  <title>File Upload Server for {{user}}</title>
+  <style>
       #head {
       overflow: hidden:
       position: relative;
@@ -110,14 +110,13 @@ TEMPLATE = """<!doctype html>
       border-bottom:1px solid #444;
       cursor: pointer;
       }
-    </style>
-  </head>
+  </style>
+</head>
+<body>
   <div id="head">
     <div id="msgbox">
       {% if statusmessage -%}
-      <div id="status">
-        <label>Status message: </label>
-        <p>
+      <div id="status"><label>Status message: </label><p>
         {{ statusmessage }}
       </div>
       {% else -%}
@@ -127,28 +126,18 @@ TEMPLATE = """<!doctype html>
       {% endif -%}
     </div>
     <div id="loginbox">
-      <form method="POST" action="/login" >
+      <form method="post" action="/login">
         <table>
           <tr>
-            <td>
-              <label>User</label>
-            </td>
-            <td>
-              <input type="text" name="user"  value="{{user}}" maxlength="30">
-            </td>
+            <td><label>User</label></td>
+            <td><input type="text" name="user" value="{{user}}" maxlength="30"></td>
           </tr>
           <tr>
-            <td>
-              <label>Password</label>
-            </td>
-            <td>
-              <input type="password" name="password" maxlength="30">
-            </td>
+            <td><label>Password</label></td>
+            <td><input type="password" name="password" maxlength="30"></td>
           </tr>
           <tr>
-            <td colspan="2">
-              <button type="submit">sign in</button>
-            </td>
+            <td colspan="2"><button type="submit">sign in</button></td>
           </tr>
         </table>
       </form>
@@ -157,17 +146,16 @@ TEMPLATE = """<!doctype html>
   <div id="content">
   {% if allow_upload -%}
   <hr class="fullhr">
-  <form action="{{bp(user, dirname)}}{{dirname}}?action=upload" method="post" enctype="multipart/form-data">
-    <input type="file" name="file" />
+    <form action="{{bp(user, dirname)}}{{dirname}}?action=upload" method="post" enctype="multipart/form-data">
+      <input type="file" name="file" />
     <button type="submit">upload</button>
-  </form>
+    </form>
   {% endif -%}
   {% if files -%}
   <hr class="fullhr">
   {% for f in files -%}
-  <p>
-  <div id="row">
-  </div>
+    <div id="row">
+    </div>
   {% if allow_fetch -%}
   <div id="link">
     <a href="{{bp(user, f["path"])}}{{f["path"]}}">
@@ -188,7 +176,7 @@ TEMPLATE = """<!doctype html>
   <hr class="fullhr">
   {% if parentdir != None -%}
   <div id="row">
-  <div id="link">
+    <div id="link">
     <a href="{{bp(user,parentdir)}}{{parentdir}}">
       &lt;parent directory&gt;
     </a>
@@ -207,7 +195,6 @@ TEMPLATE = """<!doctype html>
   <a href="{{bp(user,s["path"])}}{{s["path"]}}">
     {{s["name"]}}
   </a>
-  </form>
   </div>
   {% endfor -%}
   <hr class="fullhr">
@@ -406,8 +393,7 @@ class WebIF(object):
                        config.get("global", "host"),
                        port,
                        ssl_context=ssl_context,
-                       reuse_address=True,
-                       reuse_port=True)
+                       reuse_address=True)
 
         setattr(self, site_name, site)
         await site.start()
