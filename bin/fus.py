@@ -343,7 +343,7 @@ class WebIF(object):
                 dir_name = os.path.join(basedir, section[4:])
                 os.makedirs(dir_name, exist_ok=True)
 
-        self.app = web.Application()
+        self.app = web.Application(client_max_size=1 << 32)
         router = self.app.router
         router.add_route('GET', "/favicon.ico", self.favicon)
         router.add_route('POST', "/login", self.login)
