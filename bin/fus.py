@@ -376,7 +376,7 @@ class WebIF(object):
             if not self.config.has_option("global", "https_port"):
                 return
             port = self.config.getint("global", "https_port")
-            ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLSv1_2)
+            ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
             ssl_context.load_cert_chain(certfile=config.get("global", "certfile"),
                                         keyfile=config.get("global", "keyfile"))
             if self.cert_watcher is None:
@@ -947,7 +947,7 @@ ftp_server = make_ftp_server(config)
 ftp_thread = threading.Thread(target=ftp_server.serve_forever, args=(1,))
 ftp_thread.start()
 
-loop = asyncio.get_event_loop()
+loop = asyncio.new_event_loop()
 
 try:
     web_if = WebIF(loop, config)
